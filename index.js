@@ -237,7 +237,7 @@ app.post('/search', async (req, res) => {
 
 // --- KEEP ALIVE (prevents Render free tier from sleeping) ---
 function keepAlive() {
-  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  const url = process.env.RENDER_EXTERNAL_URL || 'https://vedastro-rag-server.onrender.com';
   const https = require('https');
   const http = require('http');
   const client = url.startsWith('https') ? https : http;
