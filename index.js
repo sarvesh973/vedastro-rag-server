@@ -62,7 +62,7 @@ async function getQueryEmbedding(text) {
 
 async function generateResponse(prompt) {
   const genAI = getGenAI();
-  const models = ['gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest'];
+  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest'];
 
   for (const modelName of models) {
     try {
