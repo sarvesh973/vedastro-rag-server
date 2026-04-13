@@ -9,6 +9,55 @@ app.use(express.json({ limit: '1mb' }));
 
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ADMIN_KEY = process.env.ADMIN_KEY || 'vedastro2024';
+
+// =========================================
+// CONVERSATION STORE (in-memory admin log)
+// =========================================
+const conversationStore = new Map();
+// Key: userIdentifier (name+place), Value: { profile, messages[], firstSeen, lastSeen }
+
+function storeConversation(userProfile, birthDate, birthTime, place, question, answer, chartUsed, sources) {
+  // Create a user key from profile info
+  const userKey = `${(place || 'unknown').toLowerCase().trim()}_${(birthDate || '').trim()}`;
+
+  // Extract name from profile string
+  let userName = 'Anonymous';
+  if (userProfile) {
+    const nameMatch = userProfile.match(/(?:Name|name)[:\s]*([^\n,|]+)/i);
+    if (nameMatch) userName = nameMatch[1].trim();
+  }
+
+  if (!conversationStore.has(userKey)) {
+    conversationStore.set(userKey, {
+      userName,
+      userProfile: userProfile || '',
+      birthDate: birthDate || '',
+      birthTime: birthTime || '',
+      place: place || '',
+      firstSeen: new Date(),
+      lastSeen: new Date(),
+      messages: [],
+      totalQuestions: 0,
+    });
+  }
+
+  const user = conversationStore.get(userKey);
+  user.lastSeen = new Date();
+  user.totalQuestions++;
+  user.messages.push({
+    role: 'user',
+    text: question,
+    timestamp: new Date(),
+  });
+  user.messages.push({
+    role: 'ai',
+    text: answer,
+    timestamp: new Date(),
+    chartUsed: chartUsed || false,
+    sourcesCount: sources ? sources.length : 0,
+  });
+}
 
 // --- LOAD KNOWLEDGE BASE ---
 let knowledgeBase = null;
@@ -454,8 +503,8 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'VedAstro AI RAG Server',
-    version: '2.0.0',
-    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts'],
+    version: '2.1.0',
+    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts', 'admin-dashboard'],
     chunks: loadKnowledgeBase().length,
   });
 });
@@ -540,6 +589,13 @@ app.post('/chat', async (req, res) => {
       verse_range: c.verse_range,
       similarity: Math.round(c.score * 100) / 100,
     }));
+
+    // Log conversation for admin dashboard
+    try {
+      storeConversation(userProfile, birthDate, birthTime, place, question, answer, !!chartData, sources);
+    } catch (logErr) {
+      console.log('Conv log error:', logErr.message);
+    }
 
     return res.json({
       answer,
@@ -627,6 +683,208 @@ app.post('/search', async (req, res) => {
   }
 });
 
+// =========================================
+// ADMIN DASHBOARD
+// =========================================
+
+// GET /admin?key=SECRET — view all conversations
+app.get('/admin', (req, res) => {
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).send('<h1 style="color:#fff;background:#1a1a2e;margin:0;padding:40vh 0;text-align:center;height:100vh;font-family:sans-serif">Access Denied</h1>');
+  }
+
+  // Build user list sorted by last active
+  const users = Array.from(conversationStore.entries())
+    .map(([key, data]) => ({ key, ...data }))
+    .sort((a, b) => b.lastSeen - a.lastSeen);
+
+  const totalMessages = users.reduce((sum, u) => sum + u.messages.length, 0);
+  const totalUsers = users.length;
+
+  // Selected user
+  const selectedKey = req.query.user || null;
+  const selectedUser = selectedKey ? conversationStore.get(selectedKey) : null;
+
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function timeAgo(date) {
+    const diff = Date.now() - new Date(date).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  }
+
+  // Build conversation HTML for selected user
+  let conversationHtml = '';
+  if (selectedUser) {
+    conversationHtml = selectedUser.messages.map(msg => {
+      const isUser = msg.role === 'user';
+      const bgColor = isUser ? '#2d1b69' : '#1a2744';
+      const borderColor = isUser ? '#7c3aed' : '#3b82f6';
+      const label = isUser ? 'User' : 'AI';
+      const labelColor = isUser ? '#a78bfa' : '#60a5fa';
+      const time = new Date(msg.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const chartBadge = msg.chartUsed ? ' <span style="background:#065f46;color:#6ee7b7;padding:2px 8px;border-radius:10px;font-size:11px">Chart Used</span>' : '';
+      const sourcesBadge = msg.sourcesCount ? ` <span style="background:#713f12;color:#fbbf24;padding:2px 8px;border-radius:10px;font-size:11px">${msg.sourcesCount} sources</span>` : '';
+
+      return `<div style="margin:12px 0;padding:16px;background:${bgColor};border-left:3px solid ${borderColor};border-radius:0 12px 12px 0">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="color:${labelColor};font-weight:600;font-size:13px">${label}${chartBadge}${sourcesBadge}</span>
+          <span style="color:#6b7280;font-size:11px">${time}</span>
+        </div>
+        <div style="color:#e5e7eb;font-size:14px;line-height:1.6;white-space:pre-wrap">${escapeHtml(msg.text)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Build user list HTML
+  const userListHtml = users.map(u => {
+    const isSelected = u.key === selectedKey;
+    const bg = isSelected ? '#2d1b69' : '#16213e';
+    const border = isSelected ? 'border:1px solid #7c3aed' : 'border:1px solid #1e3a5f';
+    const initial = (u.userName || '?')[0].toUpperCase();
+
+    return `<a href="/admin?key=${ADMIN_KEY}&user=${encodeURIComponent(u.key)}" style="text-decoration:none;display:block;padding:14px;margin:8px 0;background:${bg};${border};border-radius:12px;transition:all 0.2s">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#3b82f6);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:16px;flex-shrink:0">${initial}</div>
+        <div style="flex:1;min-width:0">
+          <div style="color:#e5e7eb;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(u.userName)}</div>
+          <div style="color:#6b7280;font-size:12px">${escapeHtml(u.place)} | ${u.totalQuestions} questions</div>
+        </div>
+        <div style="color:#6b7280;font-size:11px;flex-shrink:0">${timeAgo(u.lastSeen)}</div>
+      </div>
+    </a>`;
+  }).join('');
+
+  const noUsersHtml = totalUsers === 0
+    ? '<div style="text-align:center;padding:60px 20px;color:#6b7280"><div style="font-size:48px;margin-bottom:16px">📭</div><div style="font-size:16px">No conversations yet</div><div style="font-size:13px;margin-top:8px">Conversations will appear here as users chat with the bot</div></div>'
+    : '';
+
+  const selectedUserHeader = selectedUser
+    ? `<div style="padding:20px;background:#16213e;border-radius:12px;margin-bottom:16px">
+        <div style="font-size:18px;font-weight:700;color:#e5e7eb">${escapeHtml(selectedUser.userName)}</div>
+        <div style="color:#6b7280;font-size:13px;margin-top:4px">
+          ${escapeHtml(selectedUser.place)} | DOB: ${escapeHtml(selectedUser.birthDate)} | Time: ${escapeHtml(selectedUser.birthTime)}
+        </div>
+        <div style="color:#6b7280;font-size:12px;margin-top:4px">
+          ${selectedUser.totalQuestions} questions | First seen: ${new Date(selectedUser.firstSeen).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} | Last: ${timeAgo(selectedUser.lastSeen)}
+        </div>
+      </div>`
+    : '<div style="text-align:center;padding:80px 20px;color:#4b5563"><div style="font-size:40px;margin-bottom:12px">👈</div><div style="font-size:15px">Select a user to view their conversation</div></div>';
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VedAstro Admin</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0f0f23; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    a:hover div { opacity: 0.9; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1a2e; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:20px 24px;border-bottom:1px solid #1e3a5f;display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <div style="font-size:22px;font-weight:800;background:linear-gradient(135deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent">VedAstro Admin</div>
+      <div style="color:#6b7280;font-size:13px;margin-top:2px">Conversation Dashboard</div>
+    </div>
+    <div style="display:flex;gap:20px">
+      <div style="text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#a78bfa">${totalUsers}</div>
+        <div style="font-size:11px;color:#6b7280">Users</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#60a5fa">${totalMessages}</div>
+        <div style="font-size:11px;color:#6b7280">Messages</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Layout -->
+  <div style="display:flex;height:calc(100vh - 73px)">
+    <!-- User List (sidebar) -->
+    <div style="width:340px;border-right:1px solid #1e3a5f;overflow-y:auto;padding:12px;background:#0f0f23;flex-shrink:0">
+      <div style="padding:8px 6px;color:#9ca3af;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px">Users (${totalUsers})</div>
+      ${noUsersHtml}
+      ${userListHtml}
+    </div>
+
+    <!-- Conversation Panel -->
+    <div style="flex:1;overflow-y:auto;padding:20px;background:#0a0a1a">
+      ${selectedUserHeader}
+      ${conversationHtml}
+    </div>
+  </div>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html');
+  return res.send(html);
+});
+
+// GET /admin/api?key=SECRET — JSON API for all conversations
+app.get('/admin/api', (req, res) => {
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  const users = Array.from(conversationStore.entries()).map(([key, data]) => ({
+    key,
+    userName: data.userName,
+    place: data.place,
+    birthDate: data.birthDate,
+    totalQuestions: data.totalQuestions,
+    messageCount: data.messages.length,
+    firstSeen: data.firstSeen,
+    lastSeen: data.lastSeen,
+    messages: data.messages,
+  }));
+
+  return res.json({
+    totalUsers: users.length,
+    totalMessages: users.reduce((sum, u) => sum + u.messages.length, 0),
+    users,
+  });
+});
+
+// GET /admin/export?key=SECRET — Export all conversations as downloadable JSON
+app.get('/admin/export', (req, res) => {
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  const data = Array.from(conversationStore.entries()).map(([key, d]) => ({
+    userName: d.userName,
+    place: d.place,
+    birthDate: d.birthDate,
+    birthTime: d.birthTime,
+    totalQuestions: d.totalQuestions,
+    firstSeen: d.firstSeen,
+    lastSeen: d.lastSeen,
+    messages: d.messages,
+  }));
+
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename=vedastro-conversations-${new Date().toISOString().split('T')[0]}.json`);
+  return res.send(JSON.stringify(data, null, 2));
+});
+
 // --- KEEP ALIVE (prevents Render free tier from sleeping) ---
 function keepAlive() {
   const url = process.env.RENDER_EXTERNAL_URL || 'https://vedastro-rag-server.onrender.com';
@@ -645,7 +903,7 @@ function keepAlive() {
 
 // --- START ---
 app.listen(PORT, () => {
-  console.log(`VedAstro AI server v2.0 running on port ${PORT}`);
+  console.log(`VedAstro AI server v2.1 running on port ${PORT}`);
   loadKnowledgeBase();
   keepAlive();
 });
