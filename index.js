@@ -235,8 +235,25 @@ app.post('/search', async (req, res) => {
   }
 });
 
+// --- KEEP ALIVE (prevents Render free tier from sleeping) ---
+function keepAlive() {
+  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  const https = require('https');
+  const http = require('http');
+  const client = url.startsWith('https') ? https : http;
+
+  setInterval(() => {
+    client.get(`${url}/`, (res) => {
+      console.log(`Keep-alive ping: ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.log('Keep-alive ping failed:', err.message);
+    });
+  }, 14 * 60 * 1000); // every 14 minutes (Render sleeps after 15)
+}
+
 // --- START ---
 app.listen(PORT, () => {
   console.log(`VedAstro AI server running on port ${PORT}`);
   loadKnowledgeBase(); // preload
+  keepAlive(); // prevent sleep
 });
