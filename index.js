@@ -62,9 +62,19 @@ async function getQueryEmbedding(text) {
 
 async function generateResponse(prompt) {
   const genAI = getGenAI();
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-  const result = await model.generateContent(prompt);
-  return result.response.text();
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+
+  for (const modelName of models) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      console.log(`Generated response using ${modelName}`);
+      return result.response.text();
+    } catch (err) {
+      console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
+      if (modelName === models[models.length - 1]) throw err;
+    }
+  }
 }
 
 // --- BUILD PROMPTS ---
