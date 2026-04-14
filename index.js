@@ -501,6 +501,25 @@ Focus on: today's planetary transits, today's ruling planet (${dayOfWeek}), and 
 - "luckyColor": color aligned with today's ruling planet
 - "luckyDay": "${dayOfWeek}" (since this IS today)
 - "rating": 1-5 stars for today`;
+  } else if (period === 'tomorrow') {
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    const tomorrowStr = tomorrow.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+    const tomorrowDay = tomorrow.toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
+
+    periodInstructions = `TOMORROW'S DATE: ${tomorrowStr}
+Day: ${tomorrowDay}
+
+Generate a horoscope for TOMORROW ONLY (not today).
+Focus on: tomorrow's planetary transits, tomorrow's ruling planet (${tomorrowDay}), and upcoming energy.
+- "overall": 2-3 sentences about tomorrow's energy, how to prepare, mention the ruling planet of ${tomorrowDay}
+- "love": 1-2 sentences about tomorrow's romantic/relationship energy
+- "career": 1-2 sentences about tomorrow's work opportunities and challenges
+- "health": 1-2 sentences about tomorrow's physical/mental energy
+- "luckyNumber": a number 1-27 based on tomorrow's nakshatra
+- "luckyColor": color aligned with tomorrow's ruling planet
+- "luckyDay": "${tomorrowDay}" (since this IS tomorrow)
+- "rating": 1-5 stars for tomorrow`;
   } else if (period === 'weekly') {
     periodInstructions = `WEEK: ${weekRange}
 
@@ -675,8 +694,8 @@ app.post('/horoscope', async (req, res) => {
   try {
     const { userProfile, sign = 'Aries', period = 'daily', birthDate, birthTime, place, lat, lon } = req.body;
 
-    if (!['daily', 'weekly', 'monthly'].includes(period)) {
-      return res.status(400).json({ error: 'period must be daily, weekly, or monthly' });
+    if (!['daily', 'tomorrow', 'weekly', 'monthly'].includes(period)) {
+      return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
     }
 
     // Calculate chart if birth details provided
