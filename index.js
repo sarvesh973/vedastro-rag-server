@@ -468,27 +468,88 @@ function buildHoroscopePrompt(relevantChunks, userProfile, sign, period, chartDa
     .map(c => `[${c.book} Ch.${c.chapter}, Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
 
-  const periodLabel = period === 'daily' ? 'today' : period === 'weekly' ? 'this week' : 'this month';
   const chartContext = chartData ? formatChartForPrompt(chartData) : '';
 
-  return `You are a Vedic astrologer creating a ${period} horoscope for ${sign} sign.
+  // Build date context for each period
+  const now = new Date();
+  const todayStr = now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+  const dayOfWeek = now.toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
 
-Using the Vedic texts AND the user's actual birth chart, generate a personalized horoscope for ${periodLabel}.
+  // Week range
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay());
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  const weekRange = `${weekStart.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })} - ${weekEnd.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}`;
+
+  // Month
+  const monthName = now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
+  let periodInstructions = '';
+
+  if (period === 'daily') {
+    periodInstructions = `TODAY'S DATE: ${todayStr}
+Day: ${dayOfWeek}
+
+Generate a DAILY horoscope for TODAY ONLY.
+Focus on: today's planetary transits, today's ruling planet (${dayOfWeek}), and immediate energy.
+- "overall": 2-3 sentences about today's specific energy, mention the day's ruling planet and how it interacts with their chart
+- "love": 1-2 sentences about today's romantic/relationship energy
+- "career": 1-2 sentences about today's work energy and any meetings/decisions
+- "health": 1-2 sentences about today's physical/mental energy levels
+- "luckyNumber": a number 1-27 based on today's nakshatra
+- "luckyColor": color aligned with today's ruling planet
+- "luckyDay": "${dayOfWeek}" (since this IS today)
+- "rating": 1-5 stars for today`;
+  } else if (period === 'weekly') {
+    periodInstructions = `WEEK: ${weekRange}
+
+Generate a WEEKLY horoscope for the ENTIRE week ahead.
+Focus on: weekly planetary transits, key days to watch, and overall weekly theme.
+- "overall": 3-4 sentences covering the week's theme, highlight which days are strongest/weakest and why (planetary movements)
+- "love": 2-3 sentences about this week's relationship dynamics, mention best days for romance
+- "career": 2-3 sentences about career opportunities this week, mention key days for decisions/meetings
+- "health": 2 sentences about weekly health pattern, suggest best days for rest vs activity
+- "luckyNumber": a number 1-27 based on this week's dominant nakshatra
+- "luckyColor": color for the week based on strongest planet
+- "luckyDay": the single best day of this week for them
+- "rating": 1-5 stars for the overall week`;
+  } else {
+    periodInstructions = `MONTH: ${monthName}
+
+Generate a MONTHLY horoscope for the ENTIRE month.
+Focus on: major planetary transits this month, long-term trends, key phases of the month.
+- "overall": 4-5 sentences covering the month's big picture theme, mention any major planetary ingress or retrograde, divide month into phases (early/mid/late)
+- "love": 2-3 sentences about this month's relationship arc, mention if any planet transit affects 7th house
+- "career": 2-3 sentences about monthly career trajectory, mention promotions/changes/opportunities
+- "health": 2-3 sentences about monthly health trends, seasonal advice
+- "luckyNumber": a number 1-27 based on this month's key nakshatra
+- "luckyColor": color for the month based on dominant planetary energy
+- "luckyDay": the best day of the week to take action this month
+- "rating": 1-5 stars for the overall month`;
+  }
+
+  return `You are a Vedic astrologer creating a PERSONALIZED ${period.toUpperCase()} horoscope for ${sign} sign.
+
+${periodInstructions}
+
+IMPORTANT: The content MUST be specific to the ${period} timeframe. Daily = just today. Weekly = the full week pattern. Monthly = the big picture for the month. Each period must feel DIFFERENT and cover DIFFERENT timeframes with DIFFERENT levels of detail.
+
 ${chartContext}
 
 VERSES:
 ${versesContext}
 
-Generate a JSON response with this exact format:
+Generate a JSON response with EXACTLY this format:
 {
-  "overall": "2-3 sentence overall prediction referencing their current dasha and planetary positions",
-  "love": "1-2 sentence love prediction using D9 Navamsha insights",
-  "career": "1-2 sentence career prediction using D10 Dasamsa insights",
-  "health": "1-2 sentence health prediction",
-  "luckyNumber": a number between 1 and 27,
-  "luckyColor": "one color based on their chart",
-  "luckyDay": "one day of the week based on ruling planet",
-  "rating": a number 1-5
+  "overall": "...",
+  "love": "...",
+  "career": "...",
+  "health": "...",
+  "luckyNumber": number,
+  "luckyColor": "...",
+  "luckyDay": "...",
+  "rating": number
 }
 
 Keep it warm, Hinglish, reference specific planetary positions from their chart. Return ONLY valid JSON, no markdown.`;
