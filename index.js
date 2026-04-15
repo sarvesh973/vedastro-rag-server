@@ -15,7 +15,20 @@ const ADMIN_KEY = process.env.ADMIN_KEY || 'vedastro2024';
 // CONVERSATION STORE (in-memory admin log)
 // =========================================
 const conversationStore = new Map();
+const MAX_CONVERSATION_USERS = 200; // Cap memory — keep only last 200 users
 // Key: userIdentifier (name+place), Value: { profile, messages[], firstSeen, lastSeen }
+
+// =========================================
+// HOROSCOPE CACHE (pre-generated per sign)
+// =========================================
+const horoscopeCache = new Map();
+// Key: "aries_daily_2026-04-15", Value: { data, generatedAt }
+
+const ZODIAC_SIGNS = [
+  'Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo',
+  'Libra', 'Scorpio', 'Sagittarius', 'Capricorn', 'Aquarius', 'Pisces',
+];
+const HOROSCOPE_PERIODS = ['daily', 'tomorrow', 'weekly', 'monthly'];
 
 function storeConversation(userProfile, birthDate, birthTime, place, question, answer, chartUsed, sources) {
   // Create a user key from profile info
@@ -29,6 +42,18 @@ function storeConversation(userProfile, birthDate, birthTime, place, question, a
   }
 
   if (!conversationStore.has(userKey)) {
+    // Cap memory: remove oldest user if at limit
+    if (conversationStore.size >= MAX_CONVERSATION_USERS) {
+      let oldestKey = null, oldestTime = Infinity;
+      for (const [k, v] of conversationStore) {
+        if (v.lastSeen.getTime() < oldestTime) {
+          oldestTime = v.lastSeen.getTime();
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) conversationStore.delete(oldestKey);
+    }
+
     conversationStore.set(userKey, {
       userName,
       userProfile: userProfile || '',
@@ -965,6 +990,185 @@ app.get('/admin/export', (req, res) => {
   return res.send(JSON.stringify(data, null, 2));
 });
 
+// =========================================
+// PRE-GENERATED HOROSCOPE SYSTEM
+// =========================================
+
+function getHoroscopeCacheKey(sign, period) {
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0]; // 2026-04-15
+  // Weekly/monthly only change once per week/month
+  if (period === 'weekly') {
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - now.getDay());
+    return `${sign.toLowerCase()}_${period}_${weekStart.toISOString().split('T')[0]}`;
+  }
+  if (period === 'monthly') {
+    return `${sign.toLowerCase()}_${period}_${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }
+  if (period === 'tomorrow') {
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    return `${sign.toLowerCase()}_${period}_${tomorrow.toISOString().split('T')[0]}`;
+  }
+  return `${sign.toLowerCase()}_${period}_${dateStr}`;
+}
+
+async function generateSingleHoroscope(sign, period) {
+  try {
+    const chunks = loadKnowledgeBase();
+    const query = `${sign} horoscope ${period} predictions career love health transits`;
+    const queryEmbedding = await getQueryEmbedding(query);
+    const relevant = findRelevantChunks(queryEmbedding, chunks, 6);
+    const prompt = buildHoroscopePrompt(relevant, null, sign, period, null);
+    const responseText = await generateResponse(prompt);
+
+    let horoscope;
+    try {
+      const clean = responseText.replace(/```json?\n?/g, '').replace(/```\n?/g, '').trim();
+      horoscope = JSON.parse(clean);
+    } catch (e) {
+      horoscope = {
+        overall: responseText,
+        love: '', career: '', health: '',
+        luckyNumber: 7, luckyColor: 'Yellow', luckyDay: 'Thursday', rating: 4,
+      };
+    }
+    return horoscope;
+  } catch (err) {
+    console.error(`Failed to generate ${sign} ${period}:`, err.message);
+    return null;
+  }
+}
+
+async function preGenerateAllHoroscopes() {
+  console.log('[CRON] Starting horoscope pre-generation...');
+  const startTime = Date.now();
+  let generated = 0, failed = 0;
+
+  for (const sign of ZODIAC_SIGNS) {
+    for (const period of HOROSCOPE_PERIODS) {
+      const cacheKey = getHoroscopeCacheKey(sign, period);
+
+      // Skip if already cached for this period
+      if (horoscopeCache.has(cacheKey)) {
+        continue;
+      }
+
+      const horoscope = await generateSingleHoroscope(sign, period);
+      if (horoscope) {
+        horoscopeCache.set(cacheKey, {
+          data: horoscope,
+          sign,
+          period,
+          generatedAt: new Date().toISOString(),
+        });
+        generated++;
+        console.log(`[CRON] Generated: ${sign} ${period}`);
+      } else {
+        failed++;
+      }
+
+      // Small delay to respect rate limits (30 RPM for free tier)
+      await new Promise(r => setTimeout(r, 2500));
+    }
+  }
+
+  const elapsed = Math.round((Date.now() - startTime) / 1000);
+  console.log(`[CRON] Done! Generated: ${generated}, Failed: ${failed}, Time: ${elapsed}s, Cache size: ${horoscopeCache.size}`);
+}
+
+// Clean expired cache entries daily
+function cleanExpiredCache() {
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+  let removed = 0;
+
+  for (const [key, value] of horoscopeCache) {
+    // Remove entries older than 2 days
+    const genDate = new Date(value.generatedAt);
+    const ageHours = (now - genDate) / (1000 * 60 * 60);
+    if (ageHours > 48) {
+      horoscopeCache.delete(key);
+      removed++;
+    }
+  }
+  if (removed > 0) console.log(`[CACHE] Cleaned ${removed} expired entries`);
+}
+
+// GET /horoscope/cached — serve pre-generated horoscopes (ZERO AI cost)
+app.get('/horoscope/cached', (req, res) => {
+  const { sign = 'Aries', period = 'daily' } = req.query;
+
+  if (!ZODIAC_SIGNS.map(s => s.toLowerCase()).includes(sign.toLowerCase())) {
+    return res.status(400).json({ error: 'Invalid zodiac sign' });
+  }
+  if (!HOROSCOPE_PERIODS.includes(period)) {
+    return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
+  }
+
+  const cacheKey = getHoroscopeCacheKey(sign, period);
+  const cached = horoscopeCache.get(cacheKey);
+
+  if (cached) {
+    return res.json({
+      ...cached.data,
+      _cached: true,
+      _generatedAt: cached.generatedAt,
+    });
+  }
+
+  // Cache miss — return a holding response, don't call AI
+  return res.status(202).json({
+    overall: 'Aapka horoscope abhi generate ho raha hai. Kuch der mein try karein.',
+    love: '', career: '', health: '',
+    luckyNumber: 7, luckyColor: 'Yellow', luckyDay: 'Thursday', rating: 4,
+    _cached: false,
+    _message: 'Horoscope is being generated. Please retry in a few minutes.',
+  });
+});
+
+// GET /horoscope/status — check cache stats
+app.get('/horoscope/status', (req, res) => {
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  const entries = Array.from(horoscopeCache.entries()).map(([key, val]) => ({
+    key,
+    sign: val.sign,
+    period: val.period,
+    generatedAt: val.generatedAt,
+  }));
+  return res.json({
+    totalCached: horoscopeCache.size,
+    maxPossible: ZODIAC_SIGNS.length * HOROSCOPE_PERIODS.length,
+    entries,
+  });
+});
+
+// POST /horoscope/generate — manually trigger pre-generation (admin)
+app.post('/horoscope/generate', async (req, res) => {
+  if (req.query.key !== ADMIN_KEY) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  res.json({ message: 'Pre-generation started in background', currentCache: horoscopeCache.size });
+  preGenerateAllHoroscopes().catch(err => console.error('[CRON] Error:', err));
+});
+
+// Schedule: generate horoscopes every 6 hours
+function startHoroscopeCron() {
+  // Generate immediately on server start (with 30s delay to let server warm up)
+  setTimeout(() => {
+    preGenerateAllHoroscopes().catch(err => console.error('[CRON] Initial generation error:', err));
+  }, 30000);
+
+  // Then every 6 hours
+  setInterval(() => {
+    cleanExpiredCache();
+    preGenerateAllHoroscopes().catch(err => console.error('[CRON] Scheduled generation error:', err));
+  }, 6 * 60 * 60 * 1000);
+}
+
 // --- KEEP ALIVE (prevents Render free tier from sleeping) ---
 function keepAlive() {
   const url = process.env.RENDER_EXTERNAL_URL || 'https://vedastro-rag-server.onrender.com';
@@ -983,7 +1187,9 @@ function keepAlive() {
 
 // --- START ---
 app.listen(PORT, () => {
-  console.log(`VedAstro AI server v2.1 running on port ${PORT}`);
+  console.log(`VedAstro AI server v3.0 running on port ${PORT}`);
   loadKnowledgeBase();
   keepAlive();
+  startHoroscopeCron(); // Pre-generate horoscopes for all 12 signs
+  console.log('[CRON] Horoscope pre-generation cron started (every 6 hours)');
 });
