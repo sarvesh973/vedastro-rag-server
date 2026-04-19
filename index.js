@@ -137,7 +137,10 @@ async function getQueryEmbedding(text) {
 
 async function generateResponse(prompt) {
   const genAI = getGenAI();
-  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest'];
+  // Pinned to explicit 2.5 versions. Do NOT use 'gemini-flash-latest' —
+  // that alias silently routes to gemini-3-flash which has only 20 requests/day
+  // on the free tier and will burn the key instantly.
+  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
   for (const modelName of models) {
     try {
