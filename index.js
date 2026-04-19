@@ -28,6 +28,42 @@ const ZODIAC_SIGNS = [
   'Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo',
   'Libra', 'Scorpio', 'Sagittarius', 'Capricorn', 'Aquarius', 'Pisces',
 ];
+
+// Map Sanskrit / Vedic rashi names (as the Flutter app sends them, e.g.
+// "Mesha (Aries)", "Vrishabha (Taurus)") back to the English key the cache
+// and validation use. Also accepts plain English input.
+const SANSKRIT_TO_ENGLISH = {
+  'mesha': 'Aries', 'vrishabha': 'Taurus', 'vrishabh': 'Taurus',
+  'mithuna': 'Gemini', 'mithun': 'Gemini',
+  'karka': 'Cancer', 'kark': 'Cancer',
+  'simha': 'Leo', 'sinh': 'Leo',
+  'kanya': 'Virgo',
+  'tula': 'Libra',
+  'vrishchika': 'Scorpio', 'vrischika': 'Scorpio', 'vrishchik': 'Scorpio',
+  'dhanu': 'Sagittarius', 'dhanus': 'Sagittarius',
+  'makara': 'Capricorn', 'makar': 'Capricorn',
+  'kumbha': 'Aquarius', 'kumbh': 'Aquarius',
+  'meena': 'Pisces', 'meen': 'Pisces',
+};
+
+function normalizeSign(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  // 1) Parenthesized English: "Mesha (Aries)" → "Aries"
+  const paren = s.match(/\(([^)]+)\)/);
+  if (paren) {
+    const candidate = paren[1].trim();
+    const match = ZODIAC_SIGNS.find(z => z.toLowerCase() === candidate.toLowerCase());
+    if (match) return match;
+  }
+  // 2) Plain English input
+  const plain = ZODIAC_SIGNS.find(z => z.toLowerCase() === s.toLowerCase());
+  if (plain) return plain;
+  // 3) Plain Sanskrit input (no parens)
+  const firstWord = s.split(/\s+/)[0].toLowerCase();
+  if (SANSKRIT_TO_ENGLISH[firstWord]) return SANSKRIT_TO_ENGLISH[firstWord];
+  return null;
+}
 const HOROSCOPE_PERIODS = ['daily', 'tomorrow', 'weekly', 'monthly'];
 
 function storeConversation(userProfile, birthDate, birthTime, place, question, answer, chartUsed, sources) {
@@ -731,11 +767,14 @@ app.post('/chat', async (req, res) => {
 // POST /horoscope
 app.post('/horoscope', async (req, res) => {
   try {
-    const { userProfile, sign = 'Aries', period = 'daily', birthDate, birthTime, place, lat, lon } = req.body;
+    const { userProfile, sign: rawSign = 'Aries', period = 'daily', birthDate, birthTime, place, lat, lon } = req.body;
 
     if (!['daily', 'tomorrow', 'weekly', 'monthly'].includes(period)) {
       return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
     }
+
+    // Accept Sanskrit form from the app ("Mesha (Aries)") — normalize to English
+    const sign = normalizeSign(rawSign) || 'Aries';
 
     // Calculate chart if birth details provided
     let chartData = null;
@@ -1112,10 +1151,12 @@ function cleanExpiredCache() {
 
 // GET /horoscope/cached — serve pre-generated horoscopes (ZERO AI cost)
 app.get('/horoscope/cached', (req, res) => {
-  const { sign = 'Aries', period = 'daily' } = req.query;
+  const { sign: rawSign = 'Aries', period = 'daily' } = req.query;
 
-  if (!ZODIAC_SIGNS.map(s => s.toLowerCase()).includes(sign.toLowerCase())) {
-    return res.status(400).json({ error: 'Invalid zodiac sign' });
+  // Accept both English ("Aries") and Sanskrit ("Mesha (Aries)") forms
+  const sign = normalizeSign(rawSign);
+  if (!sign) {
+    return res.status(400).json({ error: `Invalid zodiac sign: "${rawSign}"` });
   }
   if (!HOROSCOPE_PERIODS.includes(period)) {
     return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
