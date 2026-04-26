@@ -12,6 +12,45 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'vedastro2024';
 
 // =========================================
+// FOUNDER / ADMIN BYPASS
+// =========================================
+// Emails that bypass paywalls + quota limits. MUST match the list in
+// the Flutter client at lib/config/api_config.dart -> adminEmails.
+// Comparison is case-insensitive (everything normalized to lowercase).
+//
+// SECURITY: anyone can pass any string as `userEmail` in a request body,
+// so this list alone doesn't authenticate the caller. To prevent spoofing,
+// the production version should verify a Firebase ID token from the
+// Authorization header and read the email claim from the verified token.
+// For now we trust the body (single-developer admin usage). Add Firebase
+// Admin SDK verification before the public launch.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'sarry1254@gmail.com')
+  .split(',')
+  .map(e => e.trim().toLowerCase())
+  .filter(Boolean);
+
+function isAdminEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  return ADMIN_EMAILS.includes(email.trim().toLowerCase());
+}
+
+// =========================================
+// RAZORPAY SUBSCRIPTIONS (configured per env)
+// =========================================
+// Plan IDs are created on dashboard.razorpay.com -> Subscriptions -> Plans
+// then set in Render env vars. Falls back to placeholders for dev.
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+const RAZORPAY_PLAN_TRIAL = process.env.RAZORPAY_PLAN_TRIAL || 'plan_trial_99_placeholder';
+const RAZORPAY_PLAN_STANDARD = process.env.RAZORPAY_PLAN_STANDARD || 'plan_standard_199_placeholder';
+const RAZORPAY_PLAN_PREMIUM = process.env.RAZORPAY_PLAN_PREMIUM || 'plan_premium_499_placeholder';
+const isRazorpayConfigured = !!(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+if (!isRazorpayConfigured) {
+  console.warn('[Razorpay] keys not set — subscription endpoints will return 503 until configured');
+}
+
+// =========================================
 // CONVERSATION STORE (in-memory admin log)
 // =========================================
 const conversationStore = new Map();
@@ -658,10 +697,192 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'VedAstro AI RAG Server',
-    version: '2.1.0',
-    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts', 'admin-dashboard'],
+    version: '2.2.0',
+    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts', 'admin-dashboard', 'subscriptions'],
     chunks: loadKnowledgeBase().length,
+    razorpayConfigured: isRazorpayConfigured,
   });
+});
+
+// =========================================
+// SUBSCRIPTION ENDPOINTS (Razorpay)
+// =========================================
+// These are scaffolding for the paid-plan flow. Full wiring needs:
+//   1. `npm install razorpay` (added to package.json in this commit)
+//   2. RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET set in Render env
+//   3. Plans created on Razorpay dashboard, IDs set in env
+//   4. Webhook configured on dashboard pointing to /subscription/webhook
+//      with the same secret as RAZORPAY_WEBHOOK_SECRET
+
+const VALID_PLAN_IDS = {
+  trial: () => RAZORPAY_PLAN_TRIAL,
+  standard: () => RAZORPAY_PLAN_STANDARD,
+  premium: () => RAZORPAY_PLAN_PREMIUM,
+};
+
+// GET /admin/check?email=foo@bar.com — quick test if an email is admin
+app.get('/admin/check', (req, res) => {
+  const email = (req.query.email || '').toString();
+  res.json({ email, isAdmin: isAdminEmail(email) });
+});
+
+// POST /subscription/create — creates a Razorpay subscription for the user
+// Body: { plan: 'trial'|'standard'|'premium', userEmail, userId }
+// Returns: { subscriptionId, shortUrl, planId } OR { admin: true } if email is admin
+app.post('/subscription/create', async (req, res) => {
+  try {
+    const { plan, userEmail, userId } = req.body || {};
+
+    if (isAdminEmail(userEmail)) {
+      return res.json({
+        admin: true,
+        message: 'Admin email — no subscription needed, unlimited access granted.',
+      });
+    }
+
+    if (!plan || !VALID_PLAN_IDS[plan]) {
+      return res.status(400).json({ error: 'Invalid plan. Use trial, standard, or premium.' });
+    }
+
+    if (!isRazorpayConfigured) {
+      return res.status(503).json({
+        error: 'Razorpay not configured on server yet. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in env.',
+      });
+    }
+
+    const planId = VALID_PLAN_IDS[plan]();
+    if (!planId || planId.includes('placeholder')) {
+      return res.status(503).json({
+        error: `Razorpay plan ID for "${plan}" not set. Configure RAZORPAY_PLAN_${plan.toUpperCase()} env var.`,
+      });
+    }
+
+    // Lazy-load razorpay so the server starts even if package isn't installed yet.
+    let Razorpay;
+    try {
+      Razorpay = require('razorpay');
+    } catch (e) {
+      return res.status(503).json({
+        error: 'razorpay npm package not installed yet. Run: npm install razorpay',
+      });
+    }
+
+    const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
+
+    // For the ₹1 trial plan, we'd ideally use a separate trial sequence.
+    // Razorpay supports `start_at` for delayed first charge. For now,
+    // each plan is a normal monthly subscription — trial discount logic
+    // (₹1 first charge) will be added with the addons API in a follow-up.
+    const subscription = await rzp.subscriptions.create({
+      plan_id: planId,
+      total_count: 12,             // 12 monthly cycles before forced renewal prompt
+      customer_notify: 1,           // Razorpay sends pre-debit SMS/email automatically (CCPA compliance)
+      notes: { userId: userId || '', userEmail: userEmail || '', plan },
+    });
+
+    return res.json({
+      subscriptionId: subscription.id,
+      shortUrl: subscription.short_url,
+      planId,
+      status: subscription.status,
+    });
+  } catch (e) {
+    console.error('[subscription/create] Error:', e.message);
+    return res.status(500).json({ error: e.message || 'Subscription creation failed' });
+  }
+});
+
+// POST /subscription/cancel — cancel an active Razorpay subscription
+// Body: { subscriptionId, userEmail, cancelAtCycleEnd? }
+app.post('/subscription/cancel', async (req, res) => {
+  try {
+    const { subscriptionId, userEmail, cancelAtCycleEnd } = req.body || {};
+
+    if (isAdminEmail(userEmail)) {
+      return res.json({ admin: true, message: 'Admins have no subscription to cancel.' });
+    }
+
+    if (!subscriptionId) {
+      return res.status(400).json({ error: 'subscriptionId required' });
+    }
+
+    if (!isRazorpayConfigured) {
+      return res.status(503).json({ error: 'Razorpay not configured' });
+    }
+
+    let Razorpay;
+    try {
+      Razorpay = require('razorpay');
+    } catch (e) {
+      return res.status(503).json({ error: 'razorpay npm package not installed' });
+    }
+
+    const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
+    // cancelAtCycleEnd=true means user keeps access until current period ends.
+    // false = immediate cancel, no further access (rare; used for refunds).
+    const result = await rzp.subscriptions.cancel(subscriptionId, cancelAtCycleEnd !== false);
+
+    return res.json({
+      cancelled: true,
+      status: result.status,
+      endsAt: result.current_end ? new Date(result.current_end * 1000).toISOString() : null,
+    });
+  } catch (e) {
+    console.error('[subscription/cancel] Error:', e.message);
+    return res.status(500).json({ error: e.message || 'Cancellation failed' });
+  }
+});
+
+// POST /subscription/webhook — Razorpay calls this on every subscription event.
+// Configure on dashboard with the same secret as RAZORPAY_WEBHOOK_SECRET.
+// Subscribe to: subscription.activated, subscription.charged,
+// subscription.cancelled, subscription.completed, subscription.halted,
+// subscription.pending, subscription.paused, payment.failed
+app.post('/subscription/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  try {
+    const signature = req.headers['x-razorpay-signature'];
+    if (!RAZORPAY_WEBHOOK_SECRET) {
+      console.warn('[webhook] RAZORPAY_WEBHOOK_SECRET not set — rejecting');
+      return res.status(503).json({ error: 'Webhook secret not configured' });
+    }
+
+    // Verify HMAC-SHA256 signature so we know the request actually came from Razorpay
+    const crypto = require('crypto');
+    const expected = crypto
+      .createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
+      .update(req.body)
+      .digest('hex');
+    if (signature !== expected) {
+      console.warn('[webhook] Invalid signature — possible spoofing attempt');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    const event = JSON.parse(req.body.toString('utf8'));
+    console.log(`[webhook] Received: ${event.event}`);
+
+    // Event handler — full Firestore sync logic lands in next commit.
+    // For now we just log so we can verify the webhook plumbing works.
+    switch (event.event) {
+      case 'subscription.activated':
+      case 'subscription.charged':
+      case 'subscription.cancelled':
+      case 'subscription.completed':
+      case 'subscription.halted':
+      case 'subscription.pending':
+      case 'subscription.paused':
+      case 'payment.failed':
+        console.log(`[webhook] ${event.event} for subscription`,
+          event.payload?.subscription?.entity?.id || event.payload?.payment?.entity?.subscription_id);
+        break;
+      default:
+        console.log(`[webhook] Unhandled event type: ${event.event}`);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[webhook] Error:', e.message);
+    return res.status(500).json({ error: 'Webhook processing failed' });
+  }
 });
 
 // POST /chart - Calculate birth chart
@@ -693,10 +914,18 @@ app.post('/chart', async (req, res) => {
 // POST /chat - RAG + Chart powered chat
 app.post('/chat', async (req, res) => {
   try {
-    const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon } = req.body;
+    const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon, userEmail } = req.body;
 
     if (!question || typeof question !== 'string') {
       return res.status(400).json({ error: 'question is required' });
+    }
+
+    // Mark admin requests so they bypass any future quota enforcement.
+    // Once Firebase ID-token verification is added, this will be derived
+    // from the verified token's email claim instead of the request body.
+    const _isAdmin = isAdminEmail(userEmail);
+    if (_isAdmin) {
+      console.log(`[chat] Admin request from ${userEmail} — quota bypassed`);
     }
 
     // Calculate chart if birth details provided
