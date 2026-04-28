@@ -7,6 +7,39 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// =========================================
+// FIREBASE ADMIN SDK
+// =========================================
+// Used by the Razorpay webhook handler to mark users premium / cancelled
+// in Firestore based on subscription events. Requires
+// FIREBASE_SERVICE_ACCOUNT_JSON env var (paste the entire JSON from
+// Firebase Console -> Project Settings -> Service Accounts -> Generate
+// new private key).
+//
+// Lazy-loaded with a try/catch so the server still boots if the JSON or
+// the firebase-admin package is missing — affected endpoints return a
+// clear "not configured" error instead of crashing the whole process.
+let firebaseAdmin = null;
+let firestoreDb = null;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    const admin = require('firebase-admin');
+    if (!admin.apps.length) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+      console.log(`[firebase-admin] Initialized for project: ${serviceAccount.project_id}`);
+    }
+    firebaseAdmin = admin;
+    firestoreDb = admin.firestore();
+  } else {
+    console.warn('[firebase-admin] FIREBASE_SERVICE_ACCOUNT_JSON not set — webhook -> Firestore sync disabled');
+  }
+} catch (e) {
+  console.error('[firebase-admin] Init failed:', e.message);
+}
+
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'vedastro2024';
@@ -705,10 +738,11 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'VedAstro AI RAG Server',
-    version: '2.2.0',
-    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts', 'admin-dashboard', 'subscriptions'],
+    version: '2.3.0',
+    features: ['rag', 'chart-calculation', 'dasha', 'divisional-charts', 'admin-dashboard', 'subscriptions', 'webhook-firestore-sync'],
     chunks: loadKnowledgeBase().length,
     razorpayConfigured: isRazorpayConfigured,
+    firestoreConfigured: !!firestoreDb,
   });
 });
 
@@ -777,16 +811,31 @@ app.post('/subscription/create', async (req, res) => {
 
     const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
 
-    // For the ₹1 trial plan, we'd ideally use a separate trial sequence.
-    // Razorpay supports `start_at` for delayed first charge. For now,
-    // each plan is a normal monthly subscription — trial discount logic
-    // (₹1 first charge) will be added with the addons API in a follow-up.
-    const subscription = await rzp.subscriptions.create({
+    // Trial plan: ₹0 today (just e-mandate setup; bank may auth ~₹1-5
+    // and refund), then ₹99 charges automatically on day 7. After that,
+    // monthly ₹99 until cancelled. start_at delays the first charge.
+    //
+    // Standard / Premium: charges immediately (no start_at).
+    const subscriptionParams = {
       plan_id: planId,
       total_count: 12,             // 12 monthly cycles before forced renewal prompt
       customer_notify: 1,           // Razorpay sends pre-debit SMS/email automatically (CCPA compliance)
-      notes: { userId: userId || '', userEmail: userEmail || '', plan },
-    });
+      notes: {
+        userId: userId || '',
+        userEmail: userEmail || '',
+        plan,
+        app: 'vedastro_ai',         // tag for partner's dashboard filtering
+      },
+    };
+
+    if (plan === 'trial') {
+      const trialDays = 7;
+      const startAt = Math.floor(Date.now() / 1000) + (trialDays * 24 * 60 * 60);
+      subscriptionParams.start_at = startAt;
+      subscriptionParams.notes.trialEndsAt = new Date(startAt * 1000).toISOString();
+    }
+
+    const subscription = await rzp.subscriptions.create(subscriptionParams);
 
     return res.json({
       subscriptionId: subscription.id,
@@ -846,7 +895,7 @@ app.post('/subscription/cancel', async (req, res) => {
 // Subscribe to: subscription.activated, subscription.charged,
 // subscription.cancelled, subscription.completed, subscription.halted,
 // subscription.pending, subscription.paused, payment.failed
-app.post('/subscription/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+app.post('/subscription/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
     if (!RAZORPAY_WEBHOOK_SECRET) {
@@ -868,22 +917,14 @@ app.post('/subscription/webhook', express.raw({ type: 'application/json' }), (re
     const event = JSON.parse(req.body.toString('utf8'));
     console.log(`[webhook] Received: ${event.event}`);
 
-    // Event handler — full Firestore sync logic lands in next commit.
-    // For now we just log so we can verify the webhook plumbing works.
-    switch (event.event) {
-      case 'subscription.activated':
-      case 'subscription.charged':
-      case 'subscription.cancelled':
-      case 'subscription.completed':
-      case 'subscription.halted':
-      case 'subscription.pending':
-      case 'subscription.paused':
-      case 'payment.failed':
-        console.log(`[webhook] ${event.event} for subscription`,
-          event.payload?.subscription?.entity?.id || event.payload?.payment?.entity?.subscription_id);
-        break;
-      default:
-        console.log(`[webhook] Unhandled event type: ${event.event}`);
+    // Sync to Firestore so the user's app reflects subscription state
+    // across devices / re-installs. If Firestore isn't configured, we
+    // log and ack the webhook anyway — Razorpay stops retrying at 200 OK.
+    try {
+      await syncSubscriptionToFirestore(event);
+    } catch (syncErr) {
+      console.error('[webhook] Firestore sync error:', syncErr.message);
+      // Don't fail the webhook ack — Razorpay would retry forever.
     }
 
     return res.json({ ok: true });
@@ -892,6 +933,137 @@ app.post('/subscription/webhook', express.raw({ type: 'application/json' }), (re
     return res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
+
+/// Update users/{uid}/subscription/current and users/{uid} in Firestore
+/// based on the incoming Razorpay webhook event. Idempotent — same
+/// event delivered twice produces the same end state.
+async function syncSubscriptionToFirestore(event) {
+  if (!firestoreDb) {
+    console.warn('[webhook] Firestore not initialized — skipping sync');
+    return;
+  }
+
+  // Extract the subscription entity. Different event types nest it differently.
+  const subEntity = event.payload?.subscription?.entity;
+  const paymentEntity = event.payload?.payment?.entity;
+
+  // Pull userId from notes (we set this in /subscription/create)
+  const notes = subEntity?.notes || paymentEntity?.notes || {};
+  const userId = notes.userId;
+  const plan = notes.plan || 'standard';
+
+  if (!userId) {
+    console.warn(`[webhook] No userId in notes for ${event.event} — cannot sync`);
+    return;
+  }
+
+  const userRef = firestoreDb.collection('users').doc(userId);
+  const subRef = userRef.collection('subscription').doc('current');
+  const FieldValue = firebaseAdmin.firestore.FieldValue;
+  const now = FieldValue.serverTimestamp();
+
+  switch (event.event) {
+    case 'subscription.activated': {
+      // First successful charge OR trial e-mandate accepted.
+      const update = {
+        plan,
+        state: 'active',
+        razorpaySubscriptionId: subEntity.id,
+        activatedAt: now,
+        updatedAt: now,
+      };
+      if (subEntity.current_end) {
+        update.currentPeriodEndsAt = new Date(subEntity.current_end * 1000);
+      }
+      if (notes.trialEndsAt) {
+        update.trialEndsAt = new Date(notes.trialEndsAt);
+      }
+      await subRef.set(update, { merge: true });
+      await userRef.set({ isPremium: true, plan }, { merge: true });
+      console.log(`[webhook] Activated ${plan} for user ${userId}`);
+      break;
+    }
+
+    case 'subscription.charged': {
+      // A successful debit happened (monthly renewal). Extend access.
+      const update = {
+        state: 'active',
+        lastChargedAt: now,
+        chargesCount: FieldValue.increment(1),
+        failedAttempts: 0, // reset on successful charge
+        updatedAt: now,
+      };
+      if (subEntity.current_end) {
+        update.currentPeriodEndsAt = new Date(subEntity.current_end * 1000);
+      }
+      await subRef.set(update, { merge: true });
+      await userRef.set({ isPremium: true }, { merge: true });
+      console.log(`[webhook] Charged ${plan} for user ${userId}, ends ${update.currentPeriodEndsAt}`);
+      break;
+    }
+
+    case 'subscription.cancelled': {
+      // User cancelled. Keep premium until paid period ends.
+      const update = {
+        state: 'cancelledPending',
+        cancelledAt: now,
+        updatedAt: now,
+      };
+      if (subEntity.current_end) {
+        update.currentPeriodEndsAt = new Date(subEntity.current_end * 1000);
+      }
+      await subRef.set(update, { merge: true });
+      // isPremium stays true until period ends — a scheduled job or the
+      // app's runtime check uses currentPeriodEndsAt to flip it off.
+      console.log(`[webhook] Cancelled ${plan} for user ${userId} (access until ${update.currentPeriodEndsAt})`);
+      break;
+    }
+
+    case 'subscription.completed': {
+      // Subscription's total_count exhausted (12 cycles done).
+      await subRef.set({ state: 'expired', updatedAt: now }, { merge: true });
+      await userRef.set({ isPremium: false }, { merge: true });
+      console.log(`[webhook] Completed ${plan} for user ${userId}`);
+      break;
+    }
+
+    case 'subscription.halted':
+    case 'payment.failed': {
+      // Razorpay tried to debit but failed (insufficient funds, expired
+      // card, mandate rejected). Marks paymentFailed; Razorpay retries
+      // up to 4 times before giving up.
+      await subRef.set({
+        state: 'paymentFailed',
+        failedAttempts: FieldValue.increment(1),
+        lastFailedAt: now,
+        updatedAt: now,
+      }, { merge: true });
+      console.log(`[webhook] Payment failed for user ${userId}`);
+      break;
+    }
+
+    case 'subscription.paused': {
+      await subRef.set({ state: 'paused', updatedAt: now }, { merge: true });
+      console.log(`[webhook] Paused for user ${userId}`);
+      break;
+    }
+
+    case 'subscription.pending': {
+      // Awaiting first successful debit (often during trial e-mandate setup)
+      await subRef.set({
+        plan,
+        state: 'trialing',
+        razorpaySubscriptionId: subEntity.id,
+        updatedAt: now,
+      }, { merge: true });
+      console.log(`[webhook] Pending (trial) for user ${userId}`);
+      break;
+    }
+
+    default:
+      console.log(`[webhook] Unhandled event type: ${event.event}`);
+  }
+}
 
 // POST /chart - Calculate birth chart
 app.post('/chart', async (req, res) => {
