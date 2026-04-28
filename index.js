@@ -771,6 +771,11 @@ app.get('/admin/check', (req, res) => {
 // POST /subscription/create — creates a Razorpay subscription for the user
 // Body: { plan: 'trial'|'standard'|'premium', userEmail, userId }
 // Returns: { subscriptionId, shortUrl, planId } OR { admin: true } if email is admin
+//
+// Trial behaviour: free 7-day trial via Razorpay's `start_at` parameter.
+// E-mandate registers today (₹0 charged), first ₹99 charge fires on day 7,
+// monthly ₹99 thereafter until cancelled. User can cancel during the
+// 7-day window with no charge ever happening.
 app.post('/subscription/create', async (req, res) => {
   try {
     const { plan, userEmail, userId } = req.body || {};
