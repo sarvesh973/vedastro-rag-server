@@ -68,6 +68,159 @@ function isAdminEmail(email) {
 }
 
 // =========================================
+// FIREBASE AUTH MIDDLEWARE — verify ID token
+// =========================================
+// Every protected endpoint MUST call verifyAuth() before doing anything.
+// Returns { uid, email, plan, isAdmin } on success; sends 401 + returns null on failure.
+//
+// SECURITY: this replaces trusting client-supplied userEmail. The email here
+// comes from a Firebase-signed token, so users can't spoof admin status.
+async function verifyAuth(req, res, { allowAnonymous = false } = {}) {
+  const authHeader = req.headers.authorization || '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/);
+  if (!match) {
+    if (allowAnonymous) return { uid: null, email: null, plan: 'anonymous', isAdmin: false };
+    res.status(401).json({ error: 'Missing Authorization: Bearer <Firebase ID token>' });
+    return null;
+  }
+  if (!firebaseAdmin) {
+    res.status(503).json({ error: 'Auth not configured on server (FIREBASE_SERVICE_ACCOUNT_JSON missing)' });
+    return null;
+  }
+  try {
+    const decoded = await firebaseAdmin.auth().verifyIdToken(match[1]);
+    const email = (decoded.email || '').toLowerCase();
+
+    // Look up user's plan from Firestore (used for rate-limit tier)
+    let plan = 'free';
+    try {
+      if (firestoreDb) {
+        const usageDoc = await firestoreDb.doc(`usage/${decoded.uid}`).get();
+        if (usageDoc.exists && usageDoc.data().plan) plan = usageDoc.data().plan;
+      }
+    } catch (_) {}
+
+    return {
+      uid: decoded.uid,
+      email,
+      plan,
+      isAdmin: isAdminEmail(email),
+    };
+  } catch (e) {
+    console.warn('[auth] Token verification failed:', e.message);
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return null;
+  }
+}
+
+// =========================================
+// PER-UID RATE LIMITER — Firestore counters
+// =========================================
+// Daily caps per UID per action. Admins always allowed.
+// Returns true if allowed; sends 429 + returns false if over limit.
+const RATE_LIMITS = {
+  free:        { chat: 5,   palm: 1,  horoscope: 30,  chart: 10,  search: 20 },
+  trial:       { chat: 50,  palm: 5,  horoscope: 60,  chart: 60,  search: 100 },
+  standard:    { chat: 100, palm: 15, horoscope: 100, chart: 100, search: 200 },
+  premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500 },
+  anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0 },
+};
+
+async function rateLimit(auth, action, res) {
+  if (!auth || auth.isAdmin) return true;          // Admins skip
+  if (!firestoreDb) return true;                    // Fail open if Firestore not configured
+  const tier = RATE_LIMITS[auth.plan] || RATE_LIMITS.free;
+  const limit = tier[action];
+  if (limit === undefined || limit < 0) return true;
+  if (limit === 0) {
+    res.status(401).json({ error: 'Login required for this feature' });
+    return false;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
+  try {
+    const result = await firestoreDb.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      const data = doc.exists ? doc.data() : {};
+      const used = data[action] || 0;
+      if (used >= limit) return { allowed: false, used, limit };
+      tx.set(ref, {
+        ...data,
+        [action]: used + 1,
+        updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        // 48h TTL — Firestore TTL policy on `expiresAt` deletes it
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+      }, { merge: true });
+      return { allowed: true, used: used + 1, limit };
+    });
+
+    if (!result.allowed) {
+      res.status(429).json({
+        error: `Daily ${action} limit reached (${result.used}/${result.limit}). Upgrade your plan for more.`,
+        used: result.used,
+        limit: result.limit,
+        plan: auth.plan,
+      });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[rateLimit] error:', e.message);
+    return true; // fail open — don't block users on infra error
+  }
+}
+
+// =========================================
+// HOROSCOPE CACHE — server-side per (sign × period × date)
+// =========================================
+function horoscopePeriodKey(period) {
+  const d = new Date();
+  if (period === 'daily' || period === 'tomorrow') {
+    if (period === 'tomorrow') d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  }
+  if (period === 'weekly') {
+    const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    const dayNum = (tmp.getUTCDay() + 6) % 7;
+    tmp.setUTCDate(tmp.getUTCDate() - dayNum);
+    return tmp.toISOString().slice(0, 10);
+  }
+  if (period === 'monthly') return d.toISOString().slice(0, 7);
+  return d.toISOString().slice(0, 10);
+}
+
+async function getCachedHoroscope(sign, period) {
+  if (!firestoreDb) return null;
+  const key = `${sign.toLowerCase()}_${period}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
+  try {
+    const doc = await firestoreDb.doc(`horoscope_cache/${key}`).get();
+    if (doc.exists) return doc.data();
+  } catch (e) {
+    console.warn('[cache] read error:', e.message);
+  }
+  return null;
+}
+
+async function setCachedHoroscope(sign, period, data) {
+  if (!firestoreDb) return;
+  const key = `${sign.toLowerCase()}_${period}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
+  const ttlHours = period === 'daily' || period === 'tomorrow' ? 30 : period === 'weekly' ? 24 * 8 : 24 * 32;
+  try {
+    await firestoreDb.doc(`horoscope_cache/${key}`).set({
+      ...data,
+      generatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: new Date(Date.now() + ttlHours * 60 * 60 * 1000),
+    });
+  } catch (e) {
+    console.warn('[cache] write error:', e.message);
+  }
+}
+
+// Hard caps to prevent prompt-injection cost attacks
+const MAX_QUESTION_LEN = 500;
+
+// =========================================
 // RAZORPAY SUBSCRIPTIONS (configured per env)
 // =========================================
 // Plan IDs are created on dashboard.razorpay.com -> Subscriptions -> Plans
@@ -777,10 +930,17 @@ app.get('/admin/check', (req, res) => {
 // monthly ₹99 thereafter until cancelled. User can cancel during the
 // 7-day window with no charge ever happening.
 app.post('/subscription/create', async (req, res) => {
-  try {
-    const { plan, userEmail, userId } = req.body || {};
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
 
-    if (isAdminEmail(userEmail)) {
+  try {
+    const { plan } = req.body || {};
+
+    // Use auth-verified email/uid, NOT client-supplied (prevents admin spoofing)
+    const userEmail = auth.email;
+    const userId = auth.uid;
+
+    if (auth.isAdmin) {
       return res.json({
         admin: true,
         message: 'Admin email — no subscription needed, unlimited access granted.',
@@ -857,15 +1017,28 @@ app.post('/subscription/create', async (req, res) => {
 // POST /subscription/cancel — cancel an active Razorpay subscription
 // Body: { subscriptionId, userEmail, cancelAtCycleEnd? }
 app.post('/subscription/cancel', async (req, res) => {
-  try {
-    const { subscriptionId, userEmail, cancelAtCycleEnd } = req.body || {};
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
 
-    if (isAdminEmail(userEmail)) {
+  try {
+    const { subscriptionId, cancelAtCycleEnd } = req.body || {};
+
+    if (auth.isAdmin) {
       return res.json({ admin: true, message: 'Admins have no subscription to cancel.' });
     }
 
     if (!subscriptionId) {
       return res.status(400).json({ error: 'subscriptionId required' });
+    }
+
+    // Verify the subscription belongs to this user (prevents cancelling someone else's)
+    if (firestoreDb) {
+      try {
+        const subDoc = await firestoreDb.doc(`subscriptions/${subscriptionId}`).get();
+        if (subDoc.exists && subDoc.data().userId && subDoc.data().userId !== auth.uid) {
+          return res.status(403).json({ error: 'Subscription does not belong to you' });
+        }
+      } catch (_) {}
     }
 
     if (!isRazorpayConfigured) {
@@ -880,8 +1053,6 @@ app.post('/subscription/cancel', async (req, res) => {
     }
 
     const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
-    // cancelAtCycleEnd=true means user keeps access until current period ends.
-    // false = immediate cancel, no further access (rare; used for refunds).
     const result = await rzp.subscriptions.cancel(subscriptionId, cancelAtCycleEnd !== false);
 
     return res.json({
@@ -1072,6 +1243,10 @@ async function syncSubscriptionToFirestore(event) {
 
 // POST /chart - Calculate birth chart
 app.post('/chart', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  if (!await rateLimit(auth, 'chart', res)) return;
+
   try {
     const { birthDate, birthTime, place, lat, lon } = req.body;
 
@@ -1098,19 +1273,25 @@ app.post('/chart', async (req, res) => {
 
 // POST /chat - RAG + Chart powered chat
 app.post('/chat', async (req, res) => {
+  // 1. Auth — token from Authorization: Bearer <Firebase ID token>
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+
+  // 2. Rate limit per UID
+  if (!await rateLimit(auth, 'chat', res)) return;
+
   try {
-    const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon, userEmail } = req.body;
+    const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon } = req.body;
 
     if (!question || typeof question !== 'string') {
       return res.status(400).json({ error: 'question is required' });
     }
+    if (question.length > MAX_QUESTION_LEN) {
+      return res.status(400).json({ error: `Question too long (max ${MAX_QUESTION_LEN} chars)` });
+    }
 
-    // Mark admin requests so they bypass any future quota enforcement.
-    // Once Firebase ID-token verification is added, this will be derived
-    // from the verified token's email claim instead of the request body.
-    const _isAdmin = isAdminEmail(userEmail);
-    if (_isAdmin) {
-      console.log(`[chat] Admin request from ${userEmail} — quota bypassed`);
+    if (auth.isAdmin) {
+      console.log(`[chat] Admin request from ${auth.email} — quota bypassed`);
     }
 
     // Calculate chart if birth details provided
@@ -1180,35 +1361,30 @@ app.post('/chat', async (req, res) => {
 
 // POST /horoscope
 app.post('/horoscope', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  if (!await rateLimit(auth, 'horoscope', res)) return;
+
   try {
-    const { userProfile, sign: rawSign = 'Aries', period = 'daily', birthDate, birthTime, place, lat, lon } = req.body;
+    const { userProfile, sign: rawSign = 'Aries', period = 'daily' } = req.body;
 
     if (!['daily', 'tomorrow', 'weekly', 'monthly'].includes(period)) {
       return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
     }
 
-    // Accept Sanskrit form from the app ("Mesha (Aries)") — normalize to English
     const sign = normalizeSign(rawSign) || 'Aries';
 
-    // Calculate chart if birth details provided
-    let chartData = null;
-    if (birthDate && birthTime) {
-      let coords = { lat, lon };
-      if (!lat || !lon && place) coords = await geocodePlace(place);
-      if (coords) chartData = calculateChart(birthDate, birthTime, coords.lat, coords.lon);
-    } else if (userProfile) {
-      const parsed = parseBirthDetails(userProfile);
-      if (parsed) {
-        const coords = await geocodePlace(parsed.place);
-        if (coords) chartData = calculateChart(parsed.date, parsed.time, coords.lat, coords.lon);
-      }
+    // Check server-side cache first — saves 90%+ Gemini cost
+    const cached = await getCachedHoroscope(sign, period);
+    if (cached) {
+      return res.json({ ...cached, _cached: true });
     }
 
     const chunks = loadKnowledgeBase();
     const query = `${sign} horoscope ${period} predictions career love health transits effects`;
     const queryEmbedding = await getQueryEmbedding(query);
     const relevant = findRelevantChunks(queryEmbedding, chunks, 10);
-    const prompt = buildHoroscopePrompt(relevant, userProfile, sign, period, chartData);
+    const prompt = buildHoroscopePrompt(relevant, userProfile, sign, period, null);
     const responseText = await generateResponse(prompt);
 
     let horoscope;
@@ -1223,7 +1399,10 @@ app.post('/horoscope', async (req, res) => {
       };
     }
 
-    return res.json(horoscope);
+    // Cache for next user asking same (sign × period × date)
+    await setCachedHoroscope(sign, period, horoscope);
+
+    return res.json({ ...horoscope, _cached: false });
   } catch (err) {
     console.error('Horoscope error:', err);
     return res.status(500).json({ error: err.message });
@@ -1232,9 +1411,16 @@ app.post('/horoscope', async (req, res) => {
 
 // POST /search (debug endpoint)
 app.post('/search', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  if (!await rateLimit(auth, 'search', res)) return;
+
   try {
     const { query, topK = 5 } = req.body;
     if (!query) return res.status(400).json({ error: 'query is required' });
+    if (query.length > MAX_QUESTION_LEN) {
+      return res.status(400).json({ error: 'query too long' });
+    }
 
     const chunks = loadKnowledgeBase();
     const queryEmbedding = await getQueryEmbedding(query);
