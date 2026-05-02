@@ -221,6 +221,31 @@ async function setCachedHoroscope(sign, period, data) {
 const MAX_QUESTION_LEN = 500;
 
 // =========================================
+// ADMIN ENDPOINT GUARD — Firebase auth + isAdmin
+// =========================================
+// Replaces the weak ?key=ADMIN_KEY query param check (which was hardcoded
+// in the public repo and brute-forceable). Now requires:
+//  1. Valid Firebase ID token in Authorization header
+//  2. Token's email is in ADMIN_EMAILS list
+//
+// LEGACY FALLBACK: still accepts ?key=ADMIN_KEY if firebase-admin isn't
+// configured yet, so admin dashboard doesn't break during Render config
+// migration. Remove this fallback once FIREBASE_SERVICE_ACCOUNT_JSON is set.
+async function requireAdmin(req, res) {
+  // Legacy fallback for setup phase only
+  if (!firebaseAdmin && req.query.key === ADMIN_KEY) {
+    return { uid: 'legacy-admin', email: 'legacy-admin', isAdmin: true };
+  }
+  const auth = await verifyAuth(req, res);
+  if (!auth) return null;
+  if (!auth.isAdmin) {
+    res.status(403).json({ error: 'Admin access required' });
+    return null;
+  }
+  return auth;
+}
+
+// =========================================
 // RAZORPAY SUBSCRIPTIONS (configured per env)
 // =========================================
 // Plan IDs are created on dashboard.razorpay.com -> Subscriptions -> Plans
@@ -1446,9 +1471,11 @@ app.post('/search', async (req, res) => {
 // =========================================
 
 // GET /admin?key=SECRET — view all conversations
+// HTML admin dashboard — kept on ADMIN_KEY query auth because browsers
+// can't easily send Bearer tokens on GET. ROTATE this from default.
 app.get('/admin', (req, res) => {
-  if (req.query.key !== ADMIN_KEY) {
-    return res.status(403).send('<h1 style="color:#fff;background:#1a1a2e;margin:0;padding:40vh 0;text-align:center;height:100vh;font-family:sans-serif">Access Denied</h1>');
+  if (req.query.key !== ADMIN_KEY || ADMIN_KEY === 'vedastro2024') {
+    return res.status(403).send('<h1 style="color:#fff;background:#1a1a2e;margin:0;padding:40vh 0;text-align:center;height:100vh;font-family:sans-serif">Access Denied — set ADMIN_KEY env var to a strong value</h1>');
   }
 
   // Build user list sorted by last active
@@ -1596,11 +1623,9 @@ app.get('/admin', (req, res) => {
   return res.send(html);
 });
 
-// GET /admin/api?key=SECRET — JSON API for all conversations
-app.get('/admin/api', (req, res) => {
-  if (req.query.key !== ADMIN_KEY) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
+// GET /admin/api — JSON API. Requires Firebase admin token.
+app.get('/admin/api', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
 
   const users = Array.from(conversationStore.entries()).map(([key, data]) => ({
     key,
@@ -1621,11 +1646,9 @@ app.get('/admin/api', (req, res) => {
   });
 });
 
-// GET /admin/export?key=SECRET — Export all conversations as downloadable JSON
-app.get('/admin/export', (req, res) => {
-  if (req.query.key !== ADMIN_KEY) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
+// GET /admin/export — Export all conversations as downloadable JSON
+app.get('/admin/export', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
 
   const data = Array.from(conversationStore.entries()).map(([key, d]) => ({
     userName: d.userName,
@@ -1784,10 +1807,8 @@ app.get('/horoscope/cached', (req, res) => {
 });
 
 // GET /horoscope/status — check cache stats
-app.get('/horoscope/status', (req, res) => {
-  if (req.query.key !== ADMIN_KEY) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
+app.get('/horoscope/status', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
   const entries = Array.from(horoscopeCache.entries()).map(([key, val]) => ({
     key,
     sign: val.sign,
@@ -1803,9 +1824,7 @@ app.get('/horoscope/status', (req, res) => {
 
 // POST /horoscope/generate — manually trigger pre-generation (admin)
 app.post('/horoscope/generate', async (req, res) => {
-  if (req.query.key !== ADMIN_KEY) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
+  if (!await requireAdmin(req, res)) return;
   res.json({ message: 'Pre-generation started in background', currentCache: horoscopeCache.size });
   preGenerateAllHoroscopes().catch(err => console.error('[CRON] Error:', err));
 });
