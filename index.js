@@ -1263,6 +1263,52 @@ async function syncSubscriptionToFirestore(event) {
       break;
     }
 
+    case 'payment.refunded': {
+      // A specific charge was refunded (full or partial). Razorpay does
+      // NOT auto-cancel the subscription on refund — that's our call.
+      // Policy: any refund -> revoke premium immediately + cancel sub at
+      // cycle end so the user isn't charged again next month.
+      const payment = paymentEntity || {};
+      const refundedAmount = payment.amount_refunded || 0;
+      const totalAmount = payment.amount || 0;
+      const isFullRefund = refundedAmount >= totalAmount;
+      console.log(
+        `[webhook] payment.refunded for user ${userId}: ` +
+        `${refundedAmount}/${totalAmount} paise (${isFullRefund ? 'FULL' : 'partial'})`
+      );
+
+      await subRef.set({
+        state: 'refunded',
+        lastRefundAt: now,
+        refundedAmountPaise: FieldValue.increment(refundedAmount),
+        refundsCount: FieldValue.increment(1),
+        updatedAt: now,
+      }, { merge: true });
+
+      // Full refund -> revoke premium immediately, partial = case-by-case
+      if (isFullRefund) {
+        await userRef.set({ isPremium: false }, { merge: true });
+      }
+
+      // Best-effort: cancel the subscription at cycle end so they aren't
+      // re-charged. Failure here doesn't break the webhook ack.
+      try {
+        const subId = payment.subscription_id || subEntity?.id;
+        if (subId && isRazorpayConfigured) {
+          const Razorpay = require('razorpay');
+          const rzp = new Razorpay({
+            key_id: RAZORPAY_KEY_ID,
+            key_secret: RAZORPAY_KEY_SECRET,
+          });
+          await rzp.subscriptions.cancel(subId, true /* atCycleEnd */);
+          console.log(`[webhook] auto-cancelled sub ${subId} after refund`);
+        }
+      } catch (cancelErr) {
+        console.error('[webhook] post-refund cancel failed:', cancelErr.message);
+      }
+      break;
+    }
+
     default:
       console.log(`[webhook] Unhandled event type: ${event.event}`);
   }
