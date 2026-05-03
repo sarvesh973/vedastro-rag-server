@@ -5,7 +5,9 @@ const { getKundli, Observer } = require('@prisri/jyotish');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+// 8mb limit accommodates palm reading base64 images (~5MB raw → ~7MB base64)
+// while still blocking absurdly large payloads.
+app.use(express.json({ limit: '8mb' }));
 
 // =========================================
 // FIREBASE ADMIN SDK
@@ -1463,6 +1465,110 @@ app.post('/search', async (req, res) => {
   } catch (err) {
     console.error('Search error:', err);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================
+// PALM READING (server-side Gemini Vision)
+// =========================================
+// Replaces the old client-side palm analysis that bundled the Gemini key
+// in the APK (extractable in 5 mins via apktool). Now the key stays on
+// the server. Auth-protected, rate-limited per UID.
+//
+// Body: { imageBase64: "<base64>", mimeType: "image/jpeg" }
+// Returns: { loveLine: {...}, careerLine: {...}, lifeLine: {...} }
+//   OR     { error: "NOT_A_PALM", message: "..." }
+
+const PALM_PROMPT = `You are a Vedic palm reading expert versed in Samudrik Shastra.
+
+FIRST: Check if the image actually shows a human palm/hand. If NOT, return EXACTLY this JSON:
+{"error":"NOT_A_PALM","message":"This image does not show a hand. Please upload a clear photo of your palm with fingers spread."}
+
+If it IS a palm, analyze:
+1. Heart Line (Hridaya Rekha): Love, emotions, relationships
+2. Head Line (Buddhi Rekha): Intelligence, thinking style, career approach
+3. Life Line (Jeevan Rekha): Vitality, energy, life journey (NOT lifespan)
+
+Return ONLY valid JSON, no markdown:
+{
+  "loveLine": {"title":"Heart Line","emoji":"❤️","insight":"...","meaning":"...","advice":"..."},
+  "careerLine": {"title":"Head Line","emoji":"🧠","insight":"...","meaning":"...","advice":"..."},
+  "lifeLine": {"title":"Life Line","emoji":"🧬","insight":"...","meaning":"...","advice":"..."}
+}
+
+Each section: 3-4 sentences, warm tone, reference Samudrik Shastra.
+NEVER predict death or lifespan.`;
+
+const MAX_PALM_BYTES = 5 * 1024 * 1024; // 5 MB raw
+
+app.post('/palm', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  if (!await rateLimit(auth, 'palm', res)) return;
+
+  try {
+    const { imageBase64, mimeType = 'image/jpeg' } = req.body || {};
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      return res.status(400).json({ error: 'imageBase64 required' });
+    }
+    // Approx byte size (base64 expands ~4/3)
+    const approxBytes = (imageBase64.length * 3) / 4;
+    if (approxBytes > MAX_PALM_BYTES) {
+      return res.status(413).json({ error: 'Image too large (max 5MB). Please retake or compress.' });
+    }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+      return res.status(400).json({ error: 'mimeType must be image/jpeg, image/png, or image/webp' });
+    }
+
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+    const result = await model.generateContent([
+      PALM_PROMPT,
+      { inlineData: { data: imageBase64, mimeType } },
+    ]);
+    const text = result.response.text();
+
+    let parsed;
+    try {
+      const clean = text.replace(/```json?\n?/g, '').replace(/```\n?/g, '').trim();
+      parsed = JSON.parse(clean);
+    } catch (e) {
+      console.error('[palm] parse failed:', e.message, 'first 200 chars:', text.slice(0, 200));
+      return res.status(502).json({
+        error: 'AI returned an unexpected format. Please retake the photo with better lighting.',
+      });
+    }
+
+    // NOT_A_PALM short-circuit
+    if (parsed.error === 'NOT_A_PALM') {
+      return res.status(200).json(parsed);
+    }
+
+    // Validate all 3 line objects exist before returning (prevents client crashes)
+    for (const k of ['loveLine', 'careerLine', 'lifeLine']) {
+      if (!parsed[k] || typeof parsed[k] !== 'object') {
+        console.error('[palm] missing field:', k);
+        return res.status(502).json({
+          error: 'Incomplete palm reading. Please try again with a clearer photo.',
+        });
+      }
+    }
+
+    // Log to user's palmReadings subcollection
+    if (firestoreDb) {
+      try {
+        await firestoreDb.collection(`users/${auth.uid}/palmReadings`).add({
+          result: parsed,
+          createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (_) {}
+    }
+
+    return res.status(200).json(parsed);
+  } catch (err) {
+    console.error('[palm] error:', err.message);
+    return res.status(500).json({ error: 'Palm reading service error. Please try again.' });
   }
 });
 
