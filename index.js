@@ -7,6 +7,13 @@ const app = express();
 app.use(cors());
 // 8mb limit accommodates palm reading base64 images (~5MB raw → ~7MB base64)
 // while still blocking absurdly large payloads.
+// Razorpay webhook needs the RAW body (not parsed JSON) so its HMAC
+// signature can be verified against the bytes Razorpay actually signed.
+// Mount the raw parser BEFORE express.json so it wins for that path.
+// Without this, express.json turns req.body into an Object and HMAC
+// verification crashes with: 'data argument must be string/Buffer/...'
+app.use('/subscription/webhook', express.raw({ type: 'application/json', limit: '1mb' }));
+
 app.use(express.json({ limit: '8mb' }));
 
 // =========================================
@@ -1098,7 +1105,7 @@ app.post('/subscription/cancel', async (req, res) => {
 // Subscribe to: subscription.activated, subscription.charged,
 // subscription.cancelled, subscription.completed, subscription.halted,
 // subscription.pending, subscription.paused, payment.failed
-app.post('/subscription/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+app.post('/subscription/webhook', async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
     if (!RAZORPAY_WEBHOOK_SECRET) {
