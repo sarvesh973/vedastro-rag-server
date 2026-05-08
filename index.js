@@ -1173,11 +1173,18 @@ async function syncSubscriptionToFirestore(event) {
   const now = FieldValue.serverTimestamp();
 
   switch (event.event) {
+    // For 7-day free trials, 'subscription.authenticated' is the FIRST
+    // event Razorpay fires — immediately after the user signs the
+    // e-mandate. Without handling it, trial users had no Firestore
+    // doc and appeared as 'free' on every cold start, losing premium
+    // on clear-data / reinstall during the trial week — even though
+    // the mandate was correctly set up with the bank.
+    case 'subscription.authenticated':
     case 'subscription.activated': {
-      // First successful charge OR trial e-mandate accepted.
+      const isTrial = plan === 'trial' || !!notes.trialEndsAt;
       const update = {
         plan,
-        state: 'active',
+        state: isTrial ? 'trialing' : 'active',
         razorpaySubscriptionId: subEntity.id,
         activatedAt: now,
         updatedAt: now,
@@ -1190,7 +1197,7 @@ async function syncSubscriptionToFirestore(event) {
       }
       await subRef.set(update, { merge: true });
       await userRef.set({ isPremium: true, plan }, { merge: true });
-      console.log(`[webhook] Activated ${plan} for user ${userId}`);
+      console.log(`[webhook] ${event.event} -> ${update.state} (${plan}) for user ${userId}`);
       break;
     }
 
