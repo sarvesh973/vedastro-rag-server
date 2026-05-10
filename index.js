@@ -694,16 +694,52 @@ async function geocodePlace(placeName) {
   // Try online geocoding via Nominatim (free, no key needed)
   try {
     const https = require('https');
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(placeName + ', India')}&format=json&limit=1`;
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(placeName + ', India')}&format=jsonv2&limit=1`;
     const data = await new Promise((resolve, reject) => {
-      https.get(url, { headers: { 'User-Agent': 'VedAstro-AI/1.0' } }, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => resolve(JSON.parse(body)));
-      }).on('error', reject);
+      // Nominatim's abuse policy requires a real, identifying User-Agent
+      // and <= 1 req/sec. They return an XML/HTML error page (not JSON)
+      // when rate-limiting OR when the User-Agent looks generic — that's
+      // what crashed the process: JSON.parse on XML threw synchronously
+      // inside this callback (where the outer try/catch can't see it),
+      // bubbling up as an uncaught exception that killed Node and forced
+      // a 502 + restart on every /chart call.
+      https.get(
+        url,
+        {
+          headers: {
+            'User-Agent':
+              'Moksha/1.1 (https://github.com/sarvesh973/vedastro-rag-server; support@vedastro.ai)',
+            'Accept': 'application/json',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            // Always resolve safely — let the caller decide. Throwing in
+            // this callback would crash Node (the original bug).
+            if (res.statusCode !== 200) {
+              console.warn(
+                `[geocode] Nominatim ${res.statusCode} for "${placeName}":`,
+                body.slice(0, 200),
+              );
+              return resolve([]);
+            }
+            try {
+              resolve(JSON.parse(body));
+            } catch (e) {
+              console.warn(
+                `[geocode] Nominatim returned non-JSON for "${placeName}" — ` +
+                  `first 200 chars: ${body.slice(0, 200)}`,
+              );
+              resolve([]);
+            }
+          });
+        },
+      ).on('error', reject);
     });
 
-    if (data.length > 0) {
+    if (Array.isArray(data) && data.length > 0) {
       return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
     }
   } catch (e) {
