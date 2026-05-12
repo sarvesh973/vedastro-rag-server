@@ -1123,7 +1123,30 @@ app.post('/subscription/cancel', async (req, res) => {
     }
 
     const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
-    const result = await rzp.subscriptions.cancel(subscriptionId, cancelAtCycleEnd !== false);
+
+    // Razorpay's cancel_at_cycle_end: true is only valid once the
+    // subscription has an active billing cycle. Trial subscriptions
+    // (state = 'authenticated' before day-7 first charge) have no
+    // cycle yet and Razorpay rejects the call with BAD_REQUEST_ERROR.
+    // Fall back to immediate cancel in that case — there's nothing to
+    // "keep until period end" anyway, since the user was never charged.
+    const wantsCycleEnd = cancelAtCycleEnd !== false;
+    let result;
+    try {
+      result = await rzp.subscriptions.cancel(subscriptionId, wantsCycleEnd);
+    } catch (cycleErr) {
+      if (wantsCycleEnd) {
+        // Log full Razorpay error shape — SDK errors don't put the real
+        // description on .message, it lives on .error.description.
+        console.warn(
+          '[subscription/cancel] cycle-end cancel rejected, retrying immediate:',
+          JSON.stringify((cycleErr && cycleErr.error) || (cycleErr && cycleErr.message) || cycleErr),
+        );
+        result = await rzp.subscriptions.cancel(subscriptionId, false);
+      } else {
+        throw cycleErr;
+      }
+    }
 
     return res.json({
       cancelled: true,
@@ -1131,8 +1154,12 @@ app.post('/subscription/cancel', async (req, res) => {
       endsAt: result.current_end ? new Date(result.current_end * 1000).toISOString() : null,
     });
   } catch (e) {
-    console.error('[subscription/cancel] Error:', e.message);
-    return res.status(500).json({ error: e.message || 'Cancellation failed' });
+    // Razorpay SDK throws { statusCode, error: { code, description, ... } }
+    // — e.message is undefined for those. Surface whatever is actually there.
+    const rzpDesc = e && e.error && (e.error.description || e.error.code);
+    const detail = rzpDesc || (e && e.message) || JSON.stringify(e);
+    console.error('[subscription/cancel] Error:', detail);
+    return res.status(500).json({ error: detail || 'Cancellation failed' });
   }
 });
 
