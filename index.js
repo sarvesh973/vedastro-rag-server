@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getKundli, Observer } = require('@prisri/jyotish');
+// Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
+// timezone, luxon converts local birth time -> UTC with historical DST.
+const { find: geoTzFind } = require('geo-tz');
+const { DateTime } = require('luxon');
 
 const app = express();
 app.use(cors());
@@ -501,13 +505,29 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       day = parseInt(parts[2]);
     }
 
-    // Convert IST to UTC (subtract 5:30)
-    let utcHours = hours - 5;
-    let utcMinutes = minutes - 30;
-    if (utcMinutes < 0) { utcMinutes += 60; utcHours--; }
-    if (utcHours < 0) { utcHours += 24; day--; }
+    // Convert the LOCAL birth time to UTC using the birthplace's ACTUAL
+    // timezone, derived from lat/lon via geo-tz. Previously this assumed
+    // every birth was IST (hardcoded -5:30) — producing wildly wrong charts
+    // (ascendant off by 5-6 whole signs) for anyone born outside India.
+    // luxon applies the correct historical DST offset for the birth date.
+    let tzName = 'Asia/Kolkata'; // fallback: most users are India-born
+    try {
+      const zones = geoTzFind(lat, lon);
+      if (zones && zones.length > 0) tzName = zones[0];
+    } catch (_) { /* keep India fallback */ }
 
-    const dob = new Date(Date.UTC(year, month - 1, day, utcHours, utcMinutes, 0));
+    const localDt = DateTime.fromObject(
+      { year, month, day, hour: hours, minute: minutes },
+      { zone: tzName },
+    );
+    if (!localDt.isValid) {
+      console.error('[chart] Invalid datetime:', localDt.invalidReason);
+      return null;
+    }
+    const dob = localDt.toUTC().toJSDate();
+    console.log('[chart] tz=' + tzName + ' local=' + year + '-' + month + '-' + day +
+      ' ' + hours + ':' + minutes + ' -> UTC ' + dob.toISOString());
+
     const observer = new Observer(lat, lon, 0);
     const chart = getKundli(dob, observer);
 
