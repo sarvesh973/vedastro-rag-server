@@ -816,29 +816,47 @@ ADDRESSING THE USER — STRICT RULES:
 - In Hindi / Hinglish, always use the formal "aap" form. Never "tum" or "tu".
 - Use the first name at most 1-2 times per reply, not every sentence.
 
-ANSWER FORMAT - STRICT, FOLLOW EXACTLY:
-Your reply has TWO parts, in this order:
+OUTPUT FORMAT - STRICT, RETURN ONLY JSON:
+Return a SINGLE JSON object, nothing else, exactly this shape:
 
-PART 1 - MAIN POINTS (bullet list):
-- Give the astrological reading as 3 to 6 bullet points.
-- Every bullet starts with "• " (bullet character + space) on its own line.
-- Each bullet is ONE clear, self-contained point: a prediction, an
-  observation about a planet/house/dasha, or advice. 1-2 sentences each.
-- Do NOT name books or put citations inside the bullets.
+{
+  "summary": [
+    "A 2 to 3 line point in plain language. The headline insight only.",
+    "Another 2 to 3 line point.",
+    "..."
+  ],
+  "details": [
+    {
+      "chapter": "Brihat Parashara Hora Shastra - 10th House of Karma",
+      "explanation": "The FULL detailed reasoning behind summary point 1: which planet, which house, which dasha, why this result. 3 to 6 sentences."
+    },
+    {
+      "chapter": "Phaladeepika - Dasha Phala",
+      "explanation": "Full reasoning behind summary point 2."
+    }
+  ]
+}
 
-PART 2 - REFERENCES (one short paragraph):
-- After the bullets, leave ONE blank line, then a single short paragraph
-  beginning exactly with "References: ".
-- Name the classical texts behind the reading, e.g. "References: This
-  reading draws on Brihat Parashara Hora Shastra on the 10th house and
-  Phaladeepika on Dasha effects."
-- Keep it 1-3 sentences. Name books + the relevant chapter/topic. Do not
-  invent verse numbers you are not given; speak about chapters/topics.
+RULES FOR THE JSON:
+- "summary" has 3 to 5 items. Each item is 2 to 3 lines: the headline
+  prediction/observation in plain language. Do NOT cram the full
+  reasoning here, keep each one short and scannable.
+- "details" has EXACTLY the same number of items as "summary", in the
+  SAME ORDER. details[i] is the deep-dive for summary[i].
+- details[i].chapter: name the classical text + the relevant chapter or
+  topic, e.g. "Brihat Parashara Hora Shastra - Effects of the 7th Lord".
+  Do not invent verse numbers you were not given; name chapters/topics.
+- details[i].explanation: the full astrological reasoning that backs
+  that summary point - the planet, house, dasha, and why. This is the
+  long part. 3 to 6 sentences.
+- Do NOT put book names or citations inside "summary" - those belong
+  only in "details".
+- Return ONLY the JSON object. No markdown fences, no text before/after.
 
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
-- Keep the whole reply (bullets + references) to 150-260 words.
+- Keep the total content (all summary + all explanations) under ~320 words.
 - Never predict death, severe illness, or create fear.
 - Do NOT add a remedy unless the user explicitly asks for remedies / upay /
   solutions. A normal reading is just the bullet points + references.
@@ -846,11 +864,11 @@ CONVERSATION RULES:
   Include 1-2 spiritual remedies (mantra, daan, gemstone, fasting) AND
   2-3 practical real-life remedies (concrete habit, lifestyle, behavioural,
   career or financial steps the person can act on this week). Keep the
-  same bullet format. Real-life remedies must be specific and actionable,
+  same summary+details JSON format. Real-life remedies must be specific and actionable,
   not vague ("stay positive" is bad; "keep a fixed 11pm sleep schedule for
   the next 40 days" is good).
 - Do not use em dashes, use commas or periods.
-- No emoji. No headers like "Main Points:"; just the bullets, blank line, then "References: ...".
+- No emoji. Output the JSON object only.
 - Match the user's language. If the user writes in Hindi or Hinglish, reply in HINGLISH using ROMAN ENGLISH SCRIPT only (e.g. "Aap Mesh lagna ke hain"). DO NOT use Devanagari script unless the user explicitly writes to you in Devanagari first.
 - Career questions → reference D10 (Dasamsa) if available.
 - Marriage/relationship questions → reference D9 (Navamsha).
@@ -1515,7 +1533,36 @@ app.post('/chat', async (req, res) => {
     const queryEmbedding = await getQueryEmbedding(searchQuery.substring(0, 500));
     const relevant = findRelevantChunks(queryEmbedding, chunks, 8);
     const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData);
-    const answer = await generateResponse(prompt);
+    const raw = await generateResponse(prompt);
+
+    // The prompt asks for JSON { summary: [...], details: [...] }.
+    // Parse it; fall back to a single-point answer on malformed output.
+    let summary = [];
+    let details = [];
+    try {
+      const clean = raw.replace(/```json?/gi, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(clean);
+      if (Array.isArray(parsed.summary)) {
+        summary = parsed.summary.map(x => String(x).trim()).filter(Boolean);
+      }
+      if (Array.isArray(parsed.details)) {
+        details = parsed.details
+          .filter(d => d && (d.chapter || d.explanation))
+          .map(d => ({
+            chapter: String(d.chapter || '').trim(),
+            explanation: String(d.explanation || '').trim(),
+          }));
+      }
+    } catch (e) {
+      console.warn('[chat] JSON parse failed, prose fallback:', e.message);
+    }
+    if (summary.length === 0) {
+      summary = [raw.trim()];
+      details = [];
+    }
+
+    // 'answer' kept for backward-compat (older app builds read only this).
+    const answer = summary.map(p => '• ' + p).join(String.fromCharCode(10));
 
     const sources = relevant.slice(0, 5).map(c => ({
       book: c.book,
@@ -1525,7 +1572,6 @@ app.post('/chat', async (req, res) => {
       similarity: Math.round(c.score * 100) / 100,
     }));
 
-    // Log conversation for admin dashboard
     try {
       storeConversation(userProfile, birthDate, birthTime, place, question, answer, !!chartData, sources);
     } catch (logErr) {
@@ -1534,6 +1580,8 @@ app.post('/chat', async (req, res) => {
 
     return res.json({
       answer,
+      summary,
+      details,
       sources,
       chartUsed: !!chartData,
       currentDasha: chartData ? `${chartData.dasha.mahadasha}/${chartData.dasha.antardasha}` : null,
