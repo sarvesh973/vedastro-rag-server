@@ -203,9 +203,9 @@ function horoscopePeriodKey(period) {
   return d.toISOString().slice(0, 10);
 }
 
-async function getCachedHoroscope(sign, period) {
+async function getCachedHoroscope(sign, period, language) {
   if (!firestoreDb) return null;
-  const key = `${sign.toLowerCase()}_${period}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
+  const key = `${sign.toLowerCase()}_${period}_${language || 'hinglish'}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
   try {
     const doc = await firestoreDb.doc(`horoscope_cache/${key}`).get();
     if (doc.exists) return doc.data();
@@ -215,9 +215,9 @@ async function getCachedHoroscope(sign, period) {
   return null;
 }
 
-async function setCachedHoroscope(sign, period, data) {
+async function setCachedHoroscope(sign, period, data, language) {
   if (!firestoreDb) return;
-  const key = `${sign.toLowerCase()}_${period}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
+  const key = `${sign.toLowerCase()}_${period}_${language || 'hinglish'}_${horoscopePeriodKey(period)}`.replace(/\s+/g, '_');
   const ttlHours = period === 'daily' || period === 'tomorrow' ? 30 : period === 'weekly' ? 24 * 8 : 24 * 32;
   try {
     await firestoreDb.doc(`horoscope_cache/${key}`).set({
@@ -794,7 +794,19 @@ function parseBirthDetails(profileStr) {
 }
 
 // --- BUILD PROMPTS (Updated with chart data) ---
-function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData) {
+// Maps the 'language' field from the app to a strict instruction block.
+function languageDirective(language) {
+  if (language === 'english') {
+    return 'LANGUAGE - STRICT: Write the ENTIRE reply in clear, natural ' +
+      'English. Do not use Hindi or Hinglish words. No Devanagari.';
+  }
+  // default: hinglish
+  return 'LANGUAGE - STRICT: Write in Hinglish - a natural Hindi + English ' +
+    'mix in ROMAN script only (e.g. "Aapke career mein achhi growth hai"). ' +
+    'Never use Devanagari script.';
+}
+
+function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language) {
   const versesContext = relevantChunks
     .map((c, i) => `[Source ${i + 1}: ${c.book} Ch.${c.chapter} "${c.chapter_name}", Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
@@ -869,7 +881,7 @@ CONVERSATION RULES:
   the next 40 days" is good).
 - Do not use em dashes, use commas or periods.
 - No emoji. Output the JSON object only.
-- Match the user's language. If the user writes in Hindi or Hinglish, reply in HINGLISH using ROMAN ENGLISH SCRIPT only (e.g. "Aap Mesh lagna ke hain"). DO NOT use Devanagari script unless the user explicitly writes to you in Devanagari first.
+- ${languageDirective(language)}
 - Career questions → reference D10 (Dasamsa) if available.
 - Marriage/relationship questions → reference D9 (Navamsha).
 - Spirituality questions → reference D20 (Vimshamsha).
@@ -887,7 +899,7 @@ USER'S LATEST MESSAGE: ${question}
 Reply as Jyotishi continuing the conversation. Natural tone, formal "aap", first name only. Output ONLY the bullet list, then one blank line, then the "References: ..." paragraph. Nothing before the first bullet, nothing after the references paragraph.`;
 }
 
-function buildHoroscopePrompt(relevantChunks, userProfile, sign, period, chartData) {
+function buildHoroscopePrompt(relevantChunks, userProfile, sign, period, chartData, language) {
   const versesContext = relevantChunks
     .map(c => `[${c.book} Ch.${c.chapter}, Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
@@ -979,7 +991,7 @@ ${periodInstructions}
 IMPORTANT: The content MUST be specific to the ${period} timeframe. Daily = just today. Weekly = the full week pattern. Monthly = the big picture for the month. Each period must feel DIFFERENT.
 
 TONE & CITATION RULES — STRICT:
-- Warm Hinglish in ROMAN ENGLISH SCRIPT only (e.g. "Aaj aapke career mein"). DO NOT use Devanagari script. Use formal "aap" form. Never "tum" or "tu".
+- ${languageDirective(language)} Use a warm, respectful tone; formal "aap" form when in Hinglish.
 - If the user's first name is available in the profile, you may use it once naturally. Never use "beta", "bachcha", "dear", "ji" suffix, "Jai Shree Ram" or any religious salutations.
 - Inside overall/love/career/health text: at most ONE inline reference (e.g. "Phaladeepika ke anusaar..."). Do NOT pepper the body with "(BPHS Ch.X)(Phaladeepika Ch.Y)" tags — it kills readability.
 - Any extra references go in a separate "sources" field as a short semicolon list.
@@ -1532,7 +1544,7 @@ app.post('/chat', async (req, res) => {
 
     const queryEmbedding = await getQueryEmbedding(searchQuery.substring(0, 500));
     const relevant = findRelevantChunks(queryEmbedding, chunks, 8);
-    const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData);
+    const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData, (req.body && req.body.language) || 'hinglish');
     const raw = await generateResponse(prompt);
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
@@ -1599,7 +1611,7 @@ app.post('/horoscope', async (req, res) => {
   if (!await rateLimit(auth, 'horoscope', res)) return;
 
   try {
-    const { userProfile, sign: rawSign = 'Aries', period = 'daily' } = req.body;
+    const { userProfile, sign: rawSign = 'Aries', period = 'daily', language = 'hinglish' } = req.body;
 
     if (!['daily', 'tomorrow', 'weekly', 'monthly'].includes(period)) {
       return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
@@ -1608,7 +1620,7 @@ app.post('/horoscope', async (req, res) => {
     const sign = normalizeSign(rawSign) || 'Aries';
 
     // Check server-side cache first — saves 90%+ Gemini cost
-    const cached = await getCachedHoroscope(sign, period);
+    const cached = await getCachedHoroscope(sign, period, language);
     if (cached) {
       return res.json({ ...cached, _cached: true });
     }
@@ -1617,7 +1629,7 @@ app.post('/horoscope', async (req, res) => {
     const query = `${sign} horoscope ${period} predictions career love health transits effects`;
     const queryEmbedding = await getQueryEmbedding(query);
     const relevant = findRelevantChunks(queryEmbedding, chunks, 10);
-    const prompt = buildHoroscopePrompt(relevant, userProfile, sign, period, null);
+    const prompt = buildHoroscopePrompt(relevant, userProfile, sign, period, null, language);
     const responseText = await generateResponse(prompt);
 
     let horoscope;
@@ -1633,7 +1645,7 @@ app.post('/horoscope', async (req, res) => {
     }
 
     // Cache for next user asking same (sign × period × date)
-    await setCachedHoroscope(sign, period, horoscope);
+    await setCachedHoroscope(sign, period, horoscope, language);
 
     return res.json({ ...horoscope, _cached: false });
   } catch (err) {
