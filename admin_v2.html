@@ -185,6 +185,77 @@
           </div>
         </section>
 
+        <!-- ── CHATS (global) ── -->
+        <section x-show="tab === 'chats'">
+          <div class="grid lg:grid-cols-3 gap-6">
+
+            <!-- Top users (left, 1 col) -->
+            <div class="lg:col-span-1">
+              <div class="flex items-center justify-between mb-3">
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">Most active</div>
+                <select x-model.number="topUsersDays" @change="loadTopUsers()"
+                  class="bg-slate-900 border border-slate-800 rounded text-xs px-2 py-1">
+                  <option :value="1">last 24h</option>
+                  <option :value="7">last 7 days</option>
+                  <option :value="30">last 30 days</option>
+                  <option :value="90">last 90 days</option>
+                </select>
+              </div>
+              <div x-show="topUsers.length === 0" class="text-slate-500 text-sm py-8 text-center">No chats in this window.</div>
+              <div class="space-y-2">
+                <template x-for="(u, i) in topUsers" :key="u.uid">
+                  <button @click="jumpToLookup(u.uid)"
+                    class="w-full text-left p-3 rounded-lg bg-slate-900 border border-slate-800 hover:border-purple-500 transition">
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="text-xs font-bold text-slate-500 w-5" x-text="'#' + (i + 1)"></span>
+                      <span class="text-sm font-semibold text-slate-200 truncate flex-1"
+                        x-text="u.displayName || u.email || u.phoneNumber || u.uid.slice(0, 12)"></span>
+                      <span class="text-xs font-mono text-purple-300" x-text="u.total"></span>
+                    </div>
+                    <div class="text-xs text-slate-500 ml-7 flex items-center justify-between">
+                      <span x-text="(u.user || 0) + ' user · ' + (u.ai || 0) + ' ai'"></span>
+                      <span x-text="formatTime(u.lastAt)"></span>
+                    </div>
+                  </button>
+                </template>
+              </div>
+            </div>
+
+            <!-- Recent chat feed (right, 2 cols) -->
+            <div class="lg:col-span-2">
+              <div class="flex items-center justify-between mb-3">
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">
+                  Recent messages
+                  <span x-show="recentChats.length" class="text-slate-500 normal-case font-normal ml-2">
+                    (<span x-text="recentChats.length"></span>)
+                  </span>
+                </div>
+                <button @click="loadRecentChats()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+              </div>
+              <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+              <div x-show="!loading && recentChats.length === 0" class="text-center py-16 text-slate-500">No chats yet.</div>
+              <div class="space-y-2">
+                <template x-for="c in recentChats" :key="c.id">
+                  <div class="p-3 rounded"
+                    :class="c.role === 'user' ? 'bg-slate-900 border-l-2 border-purple-500' : 'bg-slate-950 border-l-2 border-amber-500 border border-slate-900'">
+                    <div class="flex items-center justify-between mb-1 text-xs text-slate-500 gap-2">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <span class="uppercase font-semibold tracking-wide flex-shrink-0"
+                          :class="c.role === 'user' ? 'text-purple-300' : 'text-amber-300'"
+                          x-text="c.role"></span>
+                        <button @click="jumpToLookup(c.uid)" class="hover:text-purple-300 truncate font-mono"
+                          x-text="c.email || (c.uid ? c.uid.slice(0, 16) : 'anonymous')"></button>
+                      </div>
+                      <span class="flex-shrink-0" x-text="formatTime(c.timestamp)"></span>
+                    </div>
+                    <div class="text-sm whitespace-pre-wrap text-slate-200" x-text="c.text"></div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- ── USER LOOKUP ── -->
         <section x-show="tab === 'lookup'">
           <form @submit.prevent="doLookup()" class="flex gap-2 mb-6">
@@ -305,11 +376,15 @@
           { id: 'overview', label: 'Overview', icon: '📊' },
           { id: 'reports', label: 'AI Reports', icon: '🚩' },
           { id: 'feedback', label: 'Feedback', icon: '📝' },
+          { id: 'chats', label: 'Chats', icon: '💬' },
           { id: 'lookup', label: 'User Lookup', icon: '👤' },
         ],
         overview: null,
         reports: [],
         feedback: [],
+        recentChats: [],
+        topUsers: [],
+        topUsersDays: 7,
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -406,6 +481,7 @@
           if (t === 'overview' && !this.overview) await this.checkAdminAndLoad();
           if (t === 'reports' && this.reports.length === 0) await this.loadReports();
           if (t === 'feedback' && this.feedback.length === 0) await this.loadFeedback();
+          if (t === 'chats' && this.recentChats.length === 0) await this.loadChatsTab();
         },
 
         async loadReports() {
@@ -472,6 +548,42 @@
           } finally {
             this.loading = false;
           }
+        },
+
+        async loadChatsTab() {
+          await Promise.all([this.loadRecentChats(), this.loadTopUsers()]);
+        },
+
+        async loadRecentChats() {
+          this.loading = true;
+          this.error = '';
+          try {
+            const r = await this.fetchApi('/admin/api/chats/recent?limit=200');
+            const d = await r.json();
+            if (!r.ok) { this.error = d.hint || d.error || 'Failed: ' + r.status; return; }
+            this.recentChats = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async loadTopUsers() {
+          try {
+            const r = await this.fetchApi('/admin/api/chats/top-users?days=' + this.topUsersDays + '&limit=20');
+            const d = await r.json();
+            if (!r.ok) { this.error = d.hint || d.error || 'Failed: ' + r.status; return; }
+            this.topUsers = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        jumpToLookup(uid) {
+          this.lookupQuery = uid;
+          this.tab = 'lookup';
+          this.doLookup().then(() => this.loadUserChats());
         },
 
         async loadUserChats() {
