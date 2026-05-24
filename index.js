@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getKundli, Observer } = require('@prisri/jyotish');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
@@ -1794,10 +1796,277 @@ app.post('/palm', async (req, res) => {
 // ADMIN DASHBOARD
 // =========================================
 
-// GET /admin?key=SECRET — view all conversations
-// HTML admin dashboard — kept on ADMIN_KEY query auth because browsers
-// can't easily send Bearer tokens on GET. ROTATE this from default.
+// GET /admin — serves the new dashboard SPA (admin_v2.html). The page
+// signs the admin in via Firebase Auth (Google) and calls the JSON
+// endpoints under /admin/api/* with a Bearer token. This replaces the
+// legacy ADMIN_KEY-querystring HTML page (still reachable at
+// /admin/legacy for the conversation viewer).
+let _adminHtmlCache = null;
 app.get('/admin', (req, res) => {
+  try {
+    if (!_adminHtmlCache) {
+      _adminHtmlCache = fs.readFileSync(
+        path.join(__dirname, 'admin_v2.html'), 'utf8');
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(_adminHtmlCache);
+  } catch (e) {
+    res.status(500).send('Failed to load dashboard: ' + e.message);
+  }
+});
+
+// GET /admin/config — public Firebase Web SDK config for the dashboard.
+// `apiKey` is a published web key (safe to expose); the SDK still
+// requires a valid Google sign-in + our server still re-verifies the
+// resulting ID token via requireAdmin() before returning any data.
+app.get('/admin/config', (req, res) => {
+  const projectId = process.env.FIREBASE_PROJECT_ID || '';
+  res.json({
+    apiKey: process.env.FIREBASE_WEB_API_KEY || '',
+    projectId,
+    authDomain: projectId ? projectId + '.firebaseapp.com' : '',
+  });
+});
+
+// ─── /admin/api/* JSON endpoints (Firebase Auth + isAdmin gated) ──
+
+// GET /admin/api/overview — counts, signups, subscription breakdown.
+app.get('/admin/api/overview', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  try {
+    const [usersAgg, feedbackAgg, reportsAgg] = await Promise.all([
+      firestoreDb.collection('users').count().get(),
+      firestoreDb.collection('feedback').count().get(),
+      firestoreDb.collection('ai_reports').count().get(),
+    ]);
+
+    // Signups in last 7 / 30 days. `createdAt` may not exist on every
+    // user doc (older entries) — that's fine, the count just excludes
+    // them. Wrap in catch so a missing index returns null instead of
+    // tanking the whole overview.
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const [signups7, signups30] = await Promise.all([
+      firestoreDb.collection('users').where('createdAt', '>', sevenDaysAgo)
+        .count().get().then(s => s.data().count).catch(() => null),
+      firestoreDb.collection('users').where('createdAt', '>', thirtyDaysAgo)
+        .count().get().then(s => s.data().count).catch(() => null),
+    ]);
+
+    // Subscriptions breakdown — small collection so we iterate.
+    const subsSnap = await firestoreDb.collection('subscriptions').get();
+    const byPlan = { trial: 0, standard: 0, premium: 0 };
+    const byStatus = { active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, authenticated: 0, other: 0 };
+    subsSnap.forEach(doc => {
+      const d = doc.data();
+      const plan = (d.plan || d.planId || '').toLowerCase();
+      if (byPlan[plan] !== undefined) byPlan[plan]++;
+      const status = (d.status || 'other').toLowerCase();
+      if (byStatus[status] !== undefined) byStatus[status]++;
+      else byStatus.other++;
+    });
+
+    res.json({
+      counts: {
+        users: usersAgg.data().count,
+        feedback: feedbackAgg.data().count,
+        aiReports: reportsAgg.data().count,
+        signups7Days: signups7,
+        signups30Days: signups30,
+      },
+      subscriptions: {
+        total: subsSnap.size,
+        byPlan,
+        byStatus,
+      },
+    });
+  } catch (e) {
+    console.error('[admin/overview]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /admin/api/reports?limit=100 — recent AI reports (newest first).
+app.get('/admin/api/reports', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.json({ items: [] });
+  const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+  try {
+    const snap = await firestoreDb.collection('ai_reports')
+      .orderBy('timestamp', 'desc').limit(limit).get();
+    const items = snap.docs.map(d => {
+      const v = d.data();
+      return {
+        id: d.id,
+        ...v,
+        timestamp: v.timestamp && v.timestamp.toDate
+          ? v.timestamp.toDate().toISOString() : null,
+        reviewedAt: v.reviewedAt && v.reviewedAt.toDate
+          ? v.reviewedAt.toDate().toISOString() : null,
+      };
+    });
+    res.json({ items });
+  } catch (e) {
+    console.error('[admin/reports]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /admin/api/reports/:id/reviewed — mark a report as reviewed.
+app.post('/admin/api/reports/:id/reviewed', async (req, res) => {
+  const auth = await requireAdmin(req, res);
+  if (!auth) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  try {
+    await firestoreDb.collection('ai_reports').doc(req.params.id).set({
+      reviewed: true,
+      reviewedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+      reviewedBy: auth.email,
+    }, { merge: true });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /admin/api/reports/:id — permanently delete a report.
+app.delete('/admin/api/reports/:id', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  try {
+    await firestoreDb.collection('ai_reports').doc(req.params.id).delete();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /admin/api/feedback?limit=100 — recent feedback (newest first).
+app.get('/admin/api/feedback', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.json({ items: [] });
+  const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+  try {
+    const snap = await firestoreDb.collection('feedback')
+      .orderBy('timestamp', 'desc').limit(limit).get();
+    const items = snap.docs.map(d => {
+      const v = d.data();
+      return {
+        id: d.id,
+        ...v,
+        timestamp: v.timestamp && v.timestamp.toDate
+          ? v.timestamp.toDate().toISOString() : null,
+      };
+    });
+    res.json({ items });
+  } catch (e) {
+    console.error('[admin/feedback]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /admin/api/user/lookup?email= OR ?uid= — fetch a user with their
+// subscription + usage stats. Falls through Firebase Auth so accounts
+// that haven't created a Firestore profile yet are still findable.
+app.get('/admin/api/user/lookup', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
+  try {
+    let user = null;
+    if (req.query.uid) {
+      const uid = String(req.query.uid).trim();
+      const doc = await firestoreDb.collection('users').doc(uid).get();
+      let authUser = null;
+      try { authUser = await firebaseAdmin.auth().getUser(uid); } catch (_) {}
+      if (doc.exists || authUser) {
+        user = {
+          uid,
+          email: authUser ? authUser.email : (doc.data() || {}).email,
+          displayName: authUser ? authUser.displayName : null,
+          phoneNumber: authUser ? authUser.phoneNumber : null,
+          ...(doc.exists ? doc.data() : {}),
+        };
+      }
+    } else if (req.query.email) {
+      const email = String(req.query.email).trim().toLowerCase();
+      try {
+        const authUser = await firebaseAdmin.auth().getUserByEmail(email);
+        const doc = await firestoreDb.collection('users').doc(authUser.uid).get();
+        user = {
+          uid: authUser.uid,
+          email: authUser.email,
+          displayName: authUser.displayName,
+          phoneNumber: authUser.phoneNumber,
+          ...(doc.exists ? doc.data() : {}),
+        };
+      } catch (_) { /* not found */ }
+    }
+    if (!user) return res.status(404).json({ error: 'not found' });
+
+    // Enrich with subscription + usage (best-effort).
+    const [subDoc, usageDoc] = await Promise.all([
+      firestoreDb.doc('users/' + user.uid + '/subscription/current')
+        .get().catch(() => null),
+      firestoreDb.doc('usage/' + user.uid).get().catch(() => null),
+    ]);
+    user.subscription = subDoc && subDoc.exists ? subDoc.data() : null;
+    user.usage = usageDoc && usageDoc.exists ? usageDoc.data() : null;
+
+    // Convert any Firestore Timestamps in subscription so the JSON is
+    // serialisable on the wire.
+    if (user.subscription) {
+      for (const k of Object.keys(user.subscription)) {
+        const v = user.subscription[k];
+        if (v && typeof v === 'object' && typeof v.toDate === 'function') {
+          user.subscription[k] = v.toDate().toISOString();
+        }
+      }
+    }
+
+    res.json(user);
+  } catch (e) {
+    console.error('[admin/user/lookup]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /admin/api/user/:uid/premium  body: { isPremium: bool }
+// Grants or revokes premium directly on the user doc. The mobile app
+// reads `isPremium` from this doc on launch (FirestoreService.setPremium)
+// so the change takes effect on next app open.
+app.post('/admin/api/user/:uid/premium', async (req, res) => {
+  const auth = await requireAdmin(req, res);
+  if (!auth) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  const isPremium = !!(req.body && req.body.isPremium);
+  try {
+    await firestoreDb.collection('users').doc(req.params.uid).set({
+      isPremium,
+      premiumGrantedBy: isPremium ? auth.email : null,
+      premiumGrantedAt: isPremium
+        ? firebaseAdmin.firestore.FieldValue.serverTimestamp()
+        : null,
+      premiumRevokedBy: isPremium ? null : auth.email,
+      premiumRevokedAt: isPremium
+        ? null
+        : firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    res.json({ ok: true, isPremium });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Legacy HTML conversation viewer (ADMIN_KEY) ────────────────────
+// Old conversation viewer, kept available at /admin/legacy?key=... so
+// the in-memory chat browser is still reachable while we migrate. The
+// new dashboard owns /admin now.
+
+// GET /admin/legacy?key=SECRET — view all conversations (legacy)
+app.get('/admin/legacy', (req, res) => {
   if (req.query.key !== ADMIN_KEY || ADMIN_KEY === 'vedastro2024') {
     return res.status(403).send('<h1 style="color:#fff;background:#1a1a2e;margin:0;padding:40vh 0;text-align:center;height:100vh;font-family:sans-serif">Access Denied — set ADMIN_KEY env var to a strong value</h1>');
   }
@@ -1863,7 +2132,7 @@ app.get('/admin', (req, res) => {
     const border = isSelected ? 'border:1px solid #7c3aed' : 'border:1px solid #1e3a5f';
     const initial = (u.userName || '?')[0].toUpperCase();
 
-    return `<a href="/admin?key=${ADMIN_KEY}&user=${encodeURIComponent(u.key)}" style="text-decoration:none;display:block;padding:14px;margin:8px 0;background:${bg};${border};border-radius:12px;transition:all 0.2s">
+    return `<a href="/admin/legacy?key=${ADMIN_KEY}&user=${encodeURIComponent(u.key)}" style="text-decoration:none;display:block;padding:14px;margin:8px 0;background:${bg};${border};border-radius:12px;transition:all 0.2s">
       <div style="display:flex;align-items:center;gap:12px">
         <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#3b82f6);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:16px;flex-shrink:0">${initial}</div>
         <div style="flex:1;min-width:0">
