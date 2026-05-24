@@ -2043,10 +2043,12 @@ app.get('/admin/api/chats/recent', async (req, res) => {
     res.json({ items: rows });
   } catch (e) {
     console.error('[admin/chats/recent]', e);
+    const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
     res.status(500).json({
       error: e.message,
-      hint: e.message && e.message.includes('index')
-        ? 'Firestore needs a collection-group index on chats(timestamp desc). Click the URL in the error to create it.'
+      indexUrl: urlMatch ? urlMatch[0] : null,
+      hint: urlMatch
+        ? 'Firestore needs a one-time collection-group index. Click "Create index" then retry in ~1 min.'
         : undefined,
     });
   }
@@ -2119,10 +2121,12 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
     res.json({ days, items });
   } catch (e) {
     console.error('[admin/chats/top-users]', e);
+    const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
     res.status(500).json({
       error: e.message,
-      hint: e.message && e.message.includes('index')
-        ? 'Firestore needs a collection-group index on chats(timestamp). Click the URL in the error to create it.'
+      indexUrl: urlMatch ? urlMatch[0] : null,
+      hint: urlMatch
+        ? 'Firestore needs a one-time collection-group index. Click "Create index" then retry in ~1 min.'
         : undefined,
     });
   }

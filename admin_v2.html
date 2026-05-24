@@ -86,7 +86,13 @@
       <main class="flex-1 overflow-y-auto p-6">
 
         <!-- Global error -->
-        <div x-show="error" class="mb-4 p-3 rounded-lg bg-rose-950 border border-rose-800 text-rose-200 text-sm" x-text="error"></div>
+        <div x-show="error" class="mb-4 p-3 rounded-lg bg-rose-950 border border-rose-800 text-rose-200 text-sm">
+          <div x-text="error"></div>
+          <a x-show="indexUrl" :href="indexUrl" target="_blank"
+            class="inline-block mt-2 px-3 py-1.5 bg-rose-800 hover:bg-rose-700 text-white rounded text-xs font-semibold">
+            Open Firestore → Create index ↗
+          </a>
+        </div>
 
         <!-- ── OVERVIEW ── -->
         <section x-show="tab === 'overview'">
@@ -448,6 +454,7 @@
         topUsersDays: 7,
         legacySessions: [],
         legacyOpen: {},     // key -> bool (expanded?)
+        indexUrl: null,
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -632,10 +639,15 @@
         async loadRecentChats() {
           this.loading = true;
           this.error = '';
+          this.indexUrl = null;
           try {
             const r = await this.fetchApi('/admin/api/chats/recent?limit=200');
             const d = await r.json();
-            if (!r.ok) { this.error = d.hint || d.error || 'Failed: ' + r.status; return; }
+            if (!r.ok) {
+              this.error = d.hint || d.error || 'Failed: ' + r.status;
+              if (d.indexUrl) this.indexUrl = d.indexUrl;
+              return;
+            }
             this.recentChats = d.items || [];
           } catch (e) {
             this.error = e.message;
@@ -648,7 +660,11 @@
           try {
             const r = await this.fetchApi('/admin/api/chats/top-users?days=' + this.topUsersDays + '&limit=20');
             const d = await r.json();
-            if (!r.ok) { this.error = d.hint || d.error || 'Failed: ' + r.status; return; }
+            if (!r.ok) {
+              this.error = d.hint || d.error || 'Failed: ' + r.status;
+              if (d.indexUrl) this.indexUrl = d.indexUrl;
+              return;
+            }
             this.topUsers = d.items || [];
           } catch (e) {
             this.error = e.message;
