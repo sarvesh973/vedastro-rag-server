@@ -1967,6 +1967,203 @@ app.get('/admin/api/feedback', async (req, res) => {
   }
 });
 
+// GET /admin/api/chats/recent?limit=200 — global feed of most recent
+// chat messages across all users. Uses collectionGroup('chats') to
+// span every users/{uid}/chats subcollection. First call will fail with
+// a Firestore index URL — click it once, wait ~1 min, retry.
+//
+// Also opportunistically scans legacy top-level collections
+// ('conversations', 'messages') for older chat data written before the
+// users/{uid}/chats layout existed. Anything found is merged in by
+// timestamp. Missing collections are silently skipped.
+app.get('/admin/api/chats/recent', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.json({ items: [] });
+  if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
+  const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
+  try {
+    const snap = await firestoreDb.collectionGroup('chats')
+      .orderBy('timestamp', 'desc').limit(limit).get();
+    const rows = snap.docs.map((d) => {
+      const data = d.data() || {};
+      const ts = data.timestamp;
+      // parent of doc = chats collection, parent of that = users/{uid}
+      const uid = d.ref.parent.parent ? d.ref.parent.parent.id : null;
+      return {
+        id: d.id,
+        uid,
+        source: 'firestore',
+        text: data.text || data.message || data.question || data.answer || '',
+        role: data.role || 'user',
+        timestamp: ts && typeof ts.toDate === 'function'
+          ? ts.toDate().toISOString() : (typeof ts === 'string' ? ts : null),
+      };
+    });
+
+    // Probe legacy top-level collections. Each is wrapped in try/catch so
+    // a non-existent collection or missing index just yields nothing.
+    for (const legacyName of ['conversations', 'messages', 'chatHistory']) {
+      try {
+        const ls = await firestoreDb.collection(legacyName)
+          .orderBy('timestamp', 'desc').limit(limit).get();
+        for (const d of ls.docs) {
+          const data = d.data() || {};
+          const ts = data.timestamp || data.createdAt;
+          rows.push({
+            id: legacyName + '/' + d.id,
+            uid: data.uid || null,
+            source: 'legacy:' + legacyName,
+            text: data.text || data.message || data.question || data.answer || JSON.stringify(data).slice(0, 500),
+            role: data.role || 'user',
+            timestamp: ts && typeof ts.toDate === 'function'
+              ? ts.toDate().toISOString() : (typeof ts === 'string' ? ts : null),
+          });
+        }
+      } catch (_) { /* collection or index doesn't exist — skip */ }
+    }
+
+    // Sort merged set newest-first, cap at limit.
+    rows.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    rows.splice(limit);
+
+    // Batch-resolve emails for the distinct uids (max 100 per call).
+    const uids = [...new Set(rows.map(r => r.uid).filter(Boolean))];
+    const emailMap = {};
+    for (let i = 0; i < uids.length; i += 100) {
+      const chunk = uids.slice(i, i + 100).map(uid => ({ uid }));
+      try {
+        const result = await firebaseAdmin.auth().getUsers(chunk);
+        for (const u of result.users) {
+          emailMap[u.uid] = u.email || u.phoneNumber || null;
+        }
+      } catch (_) { /* ignore individual chunk failures */ }
+    }
+    for (const r of rows) r.email = emailMap[r.uid] || null;
+
+    res.json({ items: rows });
+  } catch (e) {
+    console.error('[admin/chats/recent]', e);
+    res.status(500).json({
+      error: e.message,
+      hint: e.message && e.message.includes('index')
+        ? 'Firestore needs a collection-group index on chats(timestamp desc). Click the URL in the error to create it.'
+        : undefined,
+    });
+  }
+});
+
+// GET /admin/api/chats/top-users?days=7&limit=20 — most active chatters
+// in the last N days. Counts messages per uid via collectionGroup query.
+app.get('/admin/api/chats/top-users', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.json({ items: [] });
+  if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
+  const days = Math.min(Math.max(parseInt(req.query.days || '7', 10), 1), 90);
+  const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  try {
+    // Pull up to 5000 recent chats and aggregate. For larger scale we'd
+    // switch to a daily-rollup doc; for now this is plenty.
+    const snap = await firestoreDb.collectionGroup('chats')
+      .where('timestamp', '>=', since)
+      .orderBy('timestamp', 'desc')
+      .limit(5000)
+      .get();
+
+    const counts = new Map(); // uid -> { total, user, ai, last }
+    for (const d of snap.docs) {
+      const uid = d.ref.parent.parent ? d.ref.parent.parent.id : null;
+      if (!uid) continue;
+      const data = d.data() || {};
+      const role = data.role || 'user';
+      const ts = data.timestamp && data.timestamp.toDate
+        ? data.timestamp.toDate() : null;
+      const c = counts.get(uid) || { uid, total: 0, user: 0, ai: 0, last: null };
+      c.total += 1;
+      if (role === 'user') c.user += 1; else c.ai += 1;
+      if (ts && (!c.last || ts > c.last)) c.last = ts;
+      counts.set(uid, c);
+    }
+
+    const ranked = [...counts.values()]
+      .sort((a, b) => b.total - a.total)
+      .slice(0, limit);
+
+    // Resolve emails for these uids.
+    const emailMap = {};
+    for (let i = 0; i < ranked.length; i += 100) {
+      const chunk = ranked.slice(i, i + 100).map(r => ({ uid: r.uid }));
+      try {
+        const result = await firebaseAdmin.auth().getUsers(chunk);
+        for (const u of result.users) {
+          emailMap[u.uid] = {
+            email: u.email || null,
+            displayName: u.displayName || null,
+            phoneNumber: u.phoneNumber || null,
+          };
+        }
+      } catch (_) {}
+    }
+
+    const items = ranked.map(r => ({
+      uid: r.uid,
+      total: r.total,
+      user: r.user,
+      ai: r.ai,
+      lastAt: r.last ? r.last.toISOString() : null,
+      email: emailMap[r.uid] ? emailMap[r.uid].email : null,
+      displayName: emailMap[r.uid] ? emailMap[r.uid].displayName : null,
+      phoneNumber: emailMap[r.uid] ? emailMap[r.uid].phoneNumber : null,
+    }));
+
+    res.json({ days, items });
+  } catch (e) {
+    console.error('[admin/chats/top-users]', e);
+    res.status(500).json({
+      error: e.message,
+      hint: e.message && e.message.includes('index')
+        ? 'Firestore needs a collection-group index on chats(timestamp). Click the URL in the error to create it.'
+        : undefined,
+    });
+  }
+});
+
+// GET /admin/api/chats/legacy-memory — surface the in-memory
+// conversationStore (the old /admin/legacy data). This is RAM-only on
+// Render — it resets on every deploy and is capped at MAX_CONVERSATION_USERS.
+// Useful for spotting recent anonymous chatters who don't have a Firestore uid.
+app.get('/admin/api/chats/legacy-memory', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  try {
+    const sessions = Array.from(conversationStore.entries())
+      .map(([key, data]) => ({
+        key,
+        userName: data.userName || 'Anonymous',
+        place: data.place || '',
+        birthDate: data.birthDate || '',
+        birthTime: data.birthTime || '',
+        totalQuestions: data.totalQuestions || 0,
+        messageCount: (data.messages || []).length,
+        firstSeen: data.firstSeen ? data.firstSeen.toISOString() : null,
+        lastSeen: data.lastSeen ? data.lastSeen.toISOString() : null,
+        messages: (data.messages || []).map((m) => ({
+          role: m.role,
+          text: m.text,
+          timestamp: m.timestamp ? m.timestamp.toISOString() : null,
+        })),
+      }))
+      .sort((a, b) => (b.lastSeen || '').localeCompare(a.lastSeen || ''));
+
+    res.json({
+      capacity: MAX_CONVERSATION_USERS,
+      sessions,
+      note: 'In-memory only — resets on every Render deploy.',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /admin/api/user/lookup?email= OR ?uid= — fetch a user with their
 // subscription + usage stats. Falls through Firebase Auth so accounts
 // that haven't created a Firestore profile yet are still findable.
@@ -2029,6 +2226,40 @@ app.get('/admin/api/user/lookup', async (req, res) => {
     res.json(user);
   } catch (e) {
     console.error('[admin/user/lookup]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /admin/api/user/:uid/chats?limit=200 — recent chat messages for a
+// given user, newest first. Chats are stored at users/{uid}/chats by the
+// mobile app (FirestoreService.saveChatMessage).
+app.get('/admin/api/user/:uid/chats', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+  try {
+    const snap = await firestoreDb
+      .collection('users')
+      .doc(req.params.uid)
+      .collection('chats')
+      .orderBy('timestamp', 'desc')
+      .limit(limit)
+      .get();
+    const items = snap.docs.map((d) => {
+      const data = d.data() || {};
+      const ts = data.timestamp;
+      return {
+        id: d.id,
+        text: data.text || '',
+        role: data.role || 'user',
+        timestamp: ts && typeof ts.toDate === 'function'
+          ? ts.toDate().toISOString()
+          : (typeof ts === 'string' ? ts : null),
+      };
+    });
+    res.json({ items });
+  } catch (e) {
+    console.error('[admin/user/chats]', e);
     res.status(500).json({ error: e.message });
   }
 });
