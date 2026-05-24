@@ -2033,6 +2033,40 @@ app.get('/admin/api/user/lookup', async (req, res) => {
   }
 });
 
+// GET /admin/api/user/:uid/chats?limit=200 — recent chat messages for a
+// given user, newest first. Chats are stored at users/{uid}/chats by the
+// mobile app (FirestoreService.saveChatMessage).
+app.get('/admin/api/user/:uid/chats', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+  try {
+    const snap = await firestoreDb
+      .collection('users')
+      .doc(req.params.uid)
+      .collection('chats')
+      .orderBy('timestamp', 'desc')
+      .limit(limit)
+      .get();
+    const items = snap.docs.map((d) => {
+      const data = d.data() || {};
+      const ts = data.timestamp;
+      return {
+        id: d.id,
+        text: data.text || '',
+        role: data.role || 'user',
+        timestamp: ts && typeof ts.toDate === 'function'
+          ? ts.toDate().toISOString()
+          : (typeof ts === 'string' ? ts : null),
+      };
+    });
+    res.json({ items });
+  } catch (e) {
+    console.error('[admin/user/chats]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /admin/api/user/:uid/premium  body: { isPremium: bool }
 // Grants or revokes premium directly on the user doc. The mobile app
 // reads `isPremium` from this doc on launch (FirestoreService.setPremium)

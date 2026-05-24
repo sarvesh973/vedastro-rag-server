@@ -220,11 +220,42 @@
               <div><span class="text-slate-500">Palm used:</span> <span x-text="lookupResult?.usage?.palmUsedThisCycle ?? '—'"></span></div>
             </div>
 
-            <div class="flex gap-2 pt-4 border-t border-slate-800">
+            <div class="flex flex-wrap gap-2 pt-4 border-t border-slate-800">
               <button x-show="!lookupResult?.isPremium" @click="togglePremium(true)"
                 class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm font-semibold">Grant premium</button>
               <button x-show="lookupResult?.isPremium" @click="togglePremium(false)"
                 class="px-4 py-2 bg-rose-900 hover:bg-rose-800 rounded text-sm font-semibold">Revoke premium</button>
+              <button @click="loadUserChats()" :disabled="chatsLoading"
+                class="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded text-sm font-semibold">
+                <span x-text="chatsLoading ? 'Loading…' : (chats.length ? 'Reload chats' : 'View chats')"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Chat history panel -->
+          <div x-show="chats.length > 0 || chatsAttempted" class="mt-6 p-5 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="flex items-center justify-between mb-4">
+              <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">
+                Chat history
+                <span x-show="chats.length" class="text-slate-500 normal-case font-normal ml-2">
+                  (<span x-text="chats.length"></span> messages, newest first)
+                </span>
+              </div>
+            </div>
+            <div x-show="chatsAttempted && chats.length === 0" class="text-center py-8 text-slate-500 text-sm">No chats for this user.</div>
+            <div class="space-y-2 max-h-[600px] overflow-y-auto">
+              <template x-for="c in chats" :key="c.id">
+                <div class="p-3 rounded"
+                  :class="c.role === 'user' ? 'bg-slate-800/60 border-l-2 border-purple-500' : 'bg-slate-950 border-l-2 border-amber-500'">
+                  <div class="flex items-center justify-between mb-1 text-xs text-slate-500">
+                    <span class="uppercase font-semibold tracking-wide"
+                      :class="c.role === 'user' ? 'text-purple-300' : 'text-amber-300'"
+                      x-text="c.role"></span>
+                    <span x-text="formatTime(c.timestamp)"></span>
+                  </div>
+                  <div class="text-sm whitespace-pre-wrap text-slate-200" x-text="c.text"></div>
+                </div>
+              </template>
             </div>
           </div>
 
@@ -282,6 +313,9 @@
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
+        chats: [],
+        chatsLoading: false,
+        chatsAttempted: false,
 
         get overviewCards() {
           const o = this.overview;
@@ -417,6 +451,8 @@
           this.error = '';
           this.lookupAttempted = true;
           this.lookupResult = null;
+          this.chats = [];
+          this.chatsAttempted = false;
           try {
             const q = this.lookupQuery.trim();
             const isUid = q.length > 20 && !q.includes('@');
@@ -435,6 +471,27 @@
             this.error = e.message;
           } finally {
             this.loading = false;
+          }
+        },
+
+        async loadUserChats() {
+          if (!this.lookupResult) return;
+          this.chatsLoading = true;
+          this.chatsAttempted = true;
+          this.error = '';
+          try {
+            const r = await this.fetchApi('/admin/api/user/' + encodeURIComponent(this.lookupResult.uid) + '/chats?limit=200');
+            if (!r.ok) {
+              this.error = 'Failed to load chats: ' + r.status;
+              this.chats = [];
+              return;
+            }
+            const d = await r.json();
+            this.chats = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.chatsLoading = false;
           }
         },
 
