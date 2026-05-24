@@ -1971,6 +1971,11 @@ app.get('/admin/api/feedback', async (req, res) => {
 // chat messages across all users. Uses collectionGroup('chats') to
 // span every users/{uid}/chats subcollection. First call will fail with
 // a Firestore index URL — click it once, wait ~1 min, retry.
+//
+// Also opportunistically scans legacy top-level collections
+// ('conversations', 'messages') for older chat data written before the
+// users/{uid}/chats layout existed. Anything found is merged in by
+// timestamp. Missing collections are silently skipped.
 app.get('/admin/api/chats/recent', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
   if (!firestoreDb) return res.json({ items: [] });
@@ -1987,12 +1992,39 @@ app.get('/admin/api/chats/recent', async (req, res) => {
       return {
         id: d.id,
         uid,
-        text: data.text || '',
+        source: 'firestore',
+        text: data.text || data.message || data.question || data.answer || '',
         role: data.role || 'user',
         timestamp: ts && typeof ts.toDate === 'function'
           ? ts.toDate().toISOString() : (typeof ts === 'string' ? ts : null),
       };
     });
+
+    // Probe legacy top-level collections. Each is wrapped in try/catch so
+    // a non-existent collection or missing index just yields nothing.
+    for (const legacyName of ['conversations', 'messages', 'chatHistory']) {
+      try {
+        const ls = await firestoreDb.collection(legacyName)
+          .orderBy('timestamp', 'desc').limit(limit).get();
+        for (const d of ls.docs) {
+          const data = d.data() || {};
+          const ts = data.timestamp || data.createdAt;
+          rows.push({
+            id: legacyName + '/' + d.id,
+            uid: data.uid || null,
+            source: 'legacy:' + legacyName,
+            text: data.text || data.message || data.question || data.answer || JSON.stringify(data).slice(0, 500),
+            role: data.role || 'user',
+            timestamp: ts && typeof ts.toDate === 'function'
+              ? ts.toDate().toISOString() : (typeof ts === 'string' ? ts : null),
+          });
+        }
+      } catch (_) { /* collection or index doesn't exist — skip */ }
+    }
+
+    // Sort merged set newest-first, cap at limit.
+    rows.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    rows.splice(limit);
 
     // Batch-resolve emails for the distinct uids (max 100 per call).
     const uids = [...new Set(rows.map(r => r.uid).filter(Boolean))];
@@ -2093,6 +2125,42 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
         ? 'Firestore needs a collection-group index on chats(timestamp). Click the URL in the error to create it.'
         : undefined,
     });
+  }
+});
+
+// GET /admin/api/chats/legacy-memory — surface the in-memory
+// conversationStore (the old /admin/legacy data). This is RAM-only on
+// Render — it resets on every deploy and is capped at MAX_CONVERSATION_USERS.
+// Useful for spotting recent anonymous chatters who don't have a Firestore uid.
+app.get('/admin/api/chats/legacy-memory', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  try {
+    const sessions = Array.from(conversationStore.entries())
+      .map(([key, data]) => ({
+        key,
+        userName: data.userName || 'Anonymous',
+        place: data.place || '',
+        birthDate: data.birthDate || '',
+        birthTime: data.birthTime || '',
+        totalQuestions: data.totalQuestions || 0,
+        messageCount: (data.messages || []).length,
+        firstSeen: data.firstSeen ? data.firstSeen.toISOString() : null,
+        lastSeen: data.lastSeen ? data.lastSeen.toISOString() : null,
+        messages: (data.messages || []).map((m) => ({
+          role: m.role,
+          text: m.text,
+          timestamp: m.timestamp ? m.timestamp.toISOString() : null,
+        })),
+      }))
+      .sort((a, b) => (b.lastSeen || '').localeCompare(a.lastSeen || ''));
+
+    res.json({
+      capacity: MAX_CONVERSATION_USERS,
+      sessions,
+      note: 'In-memory only — resets on every Render deploy.',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

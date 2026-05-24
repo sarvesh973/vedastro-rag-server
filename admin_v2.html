@@ -243,7 +243,12 @@
                         <span class="uppercase font-semibold tracking-wide flex-shrink-0"
                           :class="c.role === 'user' ? 'text-purple-300' : 'text-amber-300'"
                           x-text="c.role"></span>
-                        <button @click="jumpToLookup(c.uid)" class="hover:text-purple-300 truncate font-mono"
+                        <span x-show="c.source && c.source.startsWith('legacy')"
+                          class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 flex-shrink-0"
+                          x-text="(c.source || '').replace('legacy:', '') || 'legacy'"></span>
+                        <button @click="c.uid && jumpToLookup(c.uid)"
+                          :class="c.uid ? 'hover:text-purple-300' : 'cursor-default'"
+                          class="truncate font-mono"
                           x-text="c.email || (c.uid ? c.uid.slice(0, 16) : 'anonymous')"></button>
                       </div>
                       <span class="flex-shrink-0" x-text="formatTime(c.timestamp)"></span>
@@ -252,6 +257,62 @@
                   </div>
                 </template>
               </div>
+            </div>
+          </div>
+
+          <!-- Legacy in-memory sessions (server RAM) -->
+          <div class="mt-8 p-5 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">
+                  Legacy in-memory sessions
+                  <span x-show="legacySessions.length" class="text-slate-500 normal-case font-normal ml-2">
+                    (<span x-text="legacySessions.length"></span>)
+                  </span>
+                </div>
+                <div class="text-xs text-slate-500 mt-1">
+                  Server RAM only · resets on every Render deploy · groups anonymous chatters by name + birthplace
+                </div>
+              </div>
+              <button @click="loadLegacyMemory()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+            </div>
+            <div x-show="legacySessions.length === 0" class="text-center py-8 text-slate-500 text-sm">No in-memory sessions (server may have restarted).</div>
+            <div class="space-y-2">
+              <template x-for="s in legacySessions" :key="s.key">
+                <div class="rounded border border-slate-800 bg-slate-950/40">
+                  <button @click="toggleLegacy(s.key)"
+                    class="w-full flex items-center justify-between p-3 text-left hover:bg-slate-900/60">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-slate-200 truncate"
+                        x-text="s.userName + ' · ' + (s.place || 'unknown')"></div>
+                      <div class="text-xs text-slate-500 mt-0.5 font-mono truncate"
+                        x-text="s.birthDate + (s.birthTime ? ' ' + s.birthTime : '')"></div>
+                    </div>
+                    <div class="flex items-center gap-4 ml-3 flex-shrink-0">
+                      <div class="text-xs text-slate-400">
+                        <span class="font-mono text-purple-300" x-text="s.totalQuestions"></span> Q ·
+                        <span class="font-mono" x-text="s.messageCount"></span> msgs
+                      </div>
+                      <span class="text-xs text-slate-500" x-text="formatTime(s.lastSeen)"></span>
+                      <span class="text-slate-500" x-text="legacyOpen[s.key] ? '▼' : '▶'"></span>
+                    </div>
+                  </button>
+                  <div x-show="legacyOpen[s.key]" class="border-t border-slate-800 p-3 space-y-2 max-h-96 overflow-y-auto">
+                    <template x-for="(m, i) in s.messages" :key="i">
+                      <div class="p-2 rounded"
+                        :class="m.role === 'user' ? 'bg-slate-900 border-l-2 border-purple-500' : 'bg-slate-950 border-l-2 border-amber-500'">
+                        <div class="flex items-center justify-between mb-1 text-xs text-slate-500">
+                          <span class="uppercase font-semibold tracking-wide"
+                            :class="m.role === 'user' ? 'text-purple-300' : 'text-amber-300'"
+                            x-text="m.role"></span>
+                          <span x-text="formatTime(m.timestamp)"></span>
+                        </div>
+                        <div class="text-sm whitespace-pre-wrap text-slate-200" x-text="m.text"></div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
         </section>
@@ -385,6 +446,8 @@
         recentChats: [],
         topUsers: [],
         topUsersDays: 7,
+        legacySessions: [],
+        legacyOpen: {},     // key -> bool (expanded?)
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -551,7 +614,19 @@
         },
 
         async loadChatsTab() {
-          await Promise.all([this.loadRecentChats(), this.loadTopUsers()]);
+          await Promise.all([this.loadRecentChats(), this.loadTopUsers(), this.loadLegacyMemory()]);
+        },
+
+        async loadLegacyMemory() {
+          try {
+            const r = await this.fetchApi('/admin/api/chats/legacy-memory');
+            const d = await r.json();
+            if (r.ok) this.legacySessions = d.sessions || [];
+          } catch (_) {}
+        },
+
+        toggleLegacy(key) {
+          this.legacyOpen[key] = !this.legacyOpen[key];
         },
 
         async loadRecentChats() {
