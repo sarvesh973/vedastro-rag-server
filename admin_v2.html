@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moksha Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .gradient-title {
+      background: linear-gradient(135deg, #c084fc, #fbbf24);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    [x-cloak] { display: none !important; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+  <div x-data="dashboard()" x-init="init()" x-cloak>
+
+    <!-- ───── LOGIN ───── -->
+    <div x-show="phase === 'login'" class="min-h-screen flex items-center justify-center p-6">
+      <div class="w-full max-w-md text-center">
+        <div class="text-3xl font-extrabold gradient-title mb-2">Moksha Admin</div>
+        <div class="text-slate-400 text-sm mb-10">Sign in with an admin Google account</div>
+        <button @click="signIn()" :disabled="loading"
+          class="w-full bg-white text-slate-900 font-semibold py-3 rounded-lg hover:bg-slate-100 disabled:opacity-50 flex items-center justify-center gap-3">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 48 48">
+            <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C12.955 4 4 12.955 4 24s8.955 20 20 20s20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/>
+            <path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C16.318 4 9.656 8.337 6.306 14.691z"/>
+            <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/>
+            <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.087 5.571c.001-.001.002-.001.003-.002l6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/>
+          </svg>
+          <span x-text="loading ? 'Signing in…' : 'Continue with Google'"></span>
+        </button>
+        <div x-show="error" class="mt-6 text-rose-400 text-sm" x-text="error"></div>
+      </div>
+    </div>
+
+    <!-- ───── NOT-ADMIN GATE ───── -->
+    <div x-show="phase === 'denied'" class="min-h-screen flex items-center justify-center p-6">
+      <div class="text-center max-w-md">
+        <div class="text-5xl mb-4">🚫</div>
+        <div class="text-xl font-bold text-rose-400 mb-2">Access denied</div>
+        <div class="text-slate-400 text-sm mb-2">Your account <span class="text-slate-200 font-mono" x-text="user?.email"></span> is not in the admin allowlist.</div>
+        <div class="text-slate-500 text-xs mb-6">Add it to the <code class="bg-slate-800 px-2 py-0.5 rounded">ADMIN_EMAILS</code> env var on Render.</div>
+        <button @click="signOutClick()" class="text-slate-400 hover:text-white text-sm underline">Sign out</button>
+      </div>
+    </div>
+
+    <!-- ───── APP SHELL ───── -->
+    <div x-show="phase === 'app'" class="flex flex-col h-screen">
+
+      <!-- Header -->
+      <header class="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/60 backdrop-blur">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center font-bold">M</div>
+          <div>
+            <div class="font-bold text-lg gradient-title">Moksha Admin</div>
+            <div class="text-xs text-slate-500" x-text="user?.email"></div>
+          </div>
+        </div>
+        <button @click="signOutClick()" class="text-slate-400 hover:text-white text-sm">Sign out</button>
+      </header>
+
+      <!-- Tabs -->
+      <nav class="flex gap-1 px-6 pt-3 border-b border-slate-800 bg-slate-900/60">
+        <template x-for="t in tabs" :key="t.id">
+          <button @click="switchTab(t.id)"
+            :class="tab === t.id ? 'bg-slate-800 text-white border-b-2 border-purple-400' : 'text-slate-400 hover:text-white'"
+            class="px-4 py-2 text-sm font-medium rounded-t flex items-center gap-2">
+            <span x-text="t.icon"></span>
+            <span x-text="t.label"></span>
+          </button>
+        </template>
+      </nav>
+
+      <!-- Body -->
+      <main class="flex-1 overflow-y-auto p-6">
+
+        <!-- Global error -->
+        <div x-show="error" class="mb-4 p-3 rounded-lg bg-rose-950 border border-rose-800 text-rose-200 text-sm" x-text="error"></div>
+
+        <!-- ── OVERVIEW ── -->
+        <section x-show="tab === 'overview'">
+          <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+          <div x-show="!loading && overview" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <template x-for="c in overviewCards" :key="c.label">
+              <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+                <div class="text-xs text-slate-500 uppercase tracking-wide mb-1" x-text="c.label"></div>
+                <div class="text-2xl font-bold" :class="c.colour" x-text="c.value ?? '—'"></div>
+                <div x-show="c.sub" class="text-xs text-slate-500 mt-1" x-text="c.sub"></div>
+              </div>
+            </template>
+          </div>
+
+          <div x-show="!loading && overview" class="grid md:grid-cols-2 gap-4">
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
+              <template x-for="(count, plan) in overview?.subscriptions?.byPlan || {}" :key="plan">
+                <div class="flex justify-between py-1.5 border-b border-slate-800 last:border-0">
+                  <span class="capitalize" x-text="plan"></span>
+                  <span class="font-mono text-purple-300" x-text="count"></span>
+                </div>
+              </template>
+            </div>
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by status</div>
+              <template x-for="(count, status) in overview?.subscriptions?.byStatus || {}" :key="status">
+                <div class="flex justify-between py-1.5 border-b border-slate-800 last:border-0">
+                  <span class="capitalize" x-text="status"></span>
+                  <span class="font-mono"
+                    :class="status === 'active' ? 'text-emerald-400' : status === 'cancelled' || status === 'expired' || status === 'halted' ? 'text-rose-400' : 'text-amber-300'"
+                    x-text="count"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </section>
+
+        <!-- ── AI REPORTS ── -->
+        <section x-show="tab === 'reports'">
+          <div class="flex items-center justify-between mb-4">
+            <div class="text-sm text-slate-400">Showing latest <span x-text="reports.length"></span> reports</div>
+            <button @click="loadReports()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+          </div>
+          <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+          <div x-show="!loading && reports.length === 0" class="text-center py-16 text-slate-500">No AI reports yet.</div>
+          <div class="space-y-3">
+            <template x-for="r in reports" :key="r.id">
+              <div class="p-4 rounded-lg bg-slate-900 border border-slate-800"
+                :class="r.reviewed ? 'opacity-60' : ''">
+                <div class="flex items-center justify-between mb-2 text-xs text-slate-500">
+                  <div class="flex items-center gap-2">
+                    <span class="bg-rose-950 text-rose-300 px-2 py-0.5 rounded" x-text="r.reason || 'inappropriate'"></span>
+                    <span x-text="r.uid?.slice(0, 12) || 'anonymous'"></span>
+                    <span x-show="r.reviewed" class="text-emerald-400">✓ reviewed</span>
+                  </div>
+                  <span x-text="formatTime(r.timestamp)"></span>
+                </div>
+                <pre class="text-xs whitespace-pre-wrap text-slate-200 bg-slate-950 p-3 rounded max-h-64 overflow-y-auto" x-text="r.messageText"></pre>
+                <div class="flex justify-end gap-2 mt-3">
+                  <button x-show="!r.reviewed" @click="markReviewed(r.id)"
+                    class="text-xs px-3 py-1.5 bg-emerald-950 hover:bg-emerald-900 text-emerald-300 rounded">Mark reviewed</button>
+                  <button @click="deleteReport(r.id)"
+                    class="text-xs px-3 py-1.5 bg-rose-950 hover:bg-rose-900 text-rose-300 rounded">Delete</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <!-- ── FEEDBACK ── -->
+        <section x-show="tab === 'feedback'">
+          <div class="flex items-center justify-between mb-4">
+            <div class="text-sm text-slate-400">Showing latest <span x-text="feedback.length"></span> entries</div>
+            <button @click="loadFeedback()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+          </div>
+          <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+          <div x-show="!loading && feedback.length === 0" class="text-center py-16 text-slate-500">No feedback yet.</div>
+          <div class="space-y-3">
+            <template x-for="f in feedback" :key="f.id">
+              <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+                <div class="flex items-center justify-between mb-2 text-xs text-slate-500">
+                  <div class="flex items-center gap-2">
+                    <span x-text="f.displayName || 'anonymous'" class="text-slate-300 font-medium"></span>
+                    <span x-show="f.email" x-text="f.email"></span>
+                    <span x-show="f.phoneNumber" x-text="f.phoneNumber"></span>
+                  </div>
+                  <span x-text="formatTime(f.timestamp)"></span>
+                </div>
+                <div class="text-sm text-slate-200 whitespace-pre-wrap" x-text="f.text"></div>
+                <div x-show="f.email" class="mt-3 text-xs">
+                  <a :href="'mailto:' + f.email + '?subject=Re: Your Moksha feedback'" class="text-purple-400 hover:underline">Reply via email →</a>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <!-- ── USER LOOKUP ── -->
+        <section x-show="tab === 'lookup'">
+          <form @submit.prevent="doLookup()" class="flex gap-2 mb-6">
+            <input x-model="lookupQuery"
+              placeholder="email or Firebase UID"
+              class="flex-1 bg-slate-900 border border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500">
+            <button type="submit" :disabled="loading"
+              class="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-semibold">
+              <span x-text="loading ? 'Searching…' : 'Look up'"></span>
+            </button>
+          </form>
+
+          <div x-show="lookupResult" class="p-5 rounded-lg bg-slate-900 border border-slate-800">
+            <div class="flex items-center gap-3 mb-4 pb-4 border-b border-slate-800">
+              <div class="w-12 h-12 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center font-bold text-lg"
+                x-text="(lookupResult?.displayName || lookupResult?.email || '?')[0].toUpperCase()"></div>
+              <div class="flex-1">
+                <div class="font-semibold" x-text="lookupResult?.displayName || lookupResult?.name || '(no name)'"></div>
+                <div class="text-xs text-slate-500 font-mono" x-text="lookupResult?.email || lookupResult?.uid"></div>
+              </div>
+              <div :class="lookupResult?.isPremium ? 'bg-emerald-950 text-emerald-300' : 'bg-slate-800 text-slate-400'"
+                class="px-3 py-1 text-xs font-semibold rounded">
+                <span x-text="lookupResult?.isPremium ? 'PREMIUM' : 'FREE'"></span>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4 text-sm mb-4">
+              <div><span class="text-slate-500">UID:</span> <span class="font-mono text-xs" x-text="lookupResult?.uid"></span></div>
+              <div><span class="text-slate-500">Phone:</span> <span x-text="lookupResult?.phoneNumber || '—'"></span></div>
+              <div><span class="text-slate-500">Plan tag:</span> <span x-text="lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || '—'"></span></div>
+              <div><span class="text-slate-500">Sub status:</span> <span x-text="lookupResult?.subscription?.status || '—'"></span></div>
+              <div><span class="text-slate-500">Chats used:</span> <span x-text="lookupResult?.usage?.chatUsedThisCycle ?? '—'"></span></div>
+              <div><span class="text-slate-500">Palm used:</span> <span x-text="lookupResult?.usage?.palmUsedThisCycle ?? '—'"></span></div>
+            </div>
+
+            <div class="flex gap-2 pt-4 border-t border-slate-800">
+              <button x-show="!lookupResult?.isPremium" @click="togglePremium(true)"
+                class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm font-semibold">Grant premium</button>
+              <button x-show="lookupResult?.isPremium" @click="togglePremium(false)"
+                class="px-4 py-2 bg-rose-900 hover:bg-rose-800 rounded text-sm font-semibold">Revoke premium</button>
+            </div>
+          </div>
+
+          <div x-show="!lookupResult && lookupAttempted" class="text-center py-12 text-slate-500">No user found.</div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- Firebase Auth (modular SDK) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+    const resp = await fetch('/admin/config');
+    const cfg = await resp.json();
+    if (!cfg.apiKey) {
+      document.body.innerHTML = '<div style="padding:40px;color:#f87171;font-family:sans-serif">' +
+        '<h2>Firebase config missing</h2>' +
+        '<p>Set <code>FIREBASE_WEB_API_KEY</code> and <code>FIREBASE_PROJECT_ID</code> on Render.</p></div>';
+      throw new Error('Firebase config missing');
+    }
+    const app = initializeApp(cfg);
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+
+    window.__moksha = {
+      signIn: () => signInWithPopup(auth, provider),
+      signOut: () => signOut(auth),
+      onAuth: (cb) => onAuthStateChanged(auth, cb),
+      getToken: () => auth.currentUser?.getIdToken(),
+    };
+    window.dispatchEvent(new CustomEvent('firebase-ready'));
+  </script>
+
+  <!-- Dashboard state (Alpine) -->
+  <script>
+    function dashboard() {
+      return {
+        phase: 'login',        // 'login' | 'denied' | 'app'
+        user: null,
+        loading: false,
+        error: '',
+        tab: 'overview',
+        tabs: [
+          { id: 'overview', label: 'Overview', icon: '📊' },
+          { id: 'reports', label: 'AI Reports', icon: '🚩' },
+          { id: 'feedback', label: 'Feedback', icon: '📝' },
+          { id: 'lookup', label: 'User Lookup', icon: '👤' },
+        ],
+        overview: null,
+        reports: [],
+        feedback: [],
+        lookupQuery: '',
+        lookupAttempted: false,
+        lookupResult: null,
+
+        get overviewCards() {
+          const o = this.overview;
+          if (!o) return [];
+          return [
+            { label: 'Total users', value: o.counts?.users, colour: 'text-purple-300' },
+            { label: 'Signups 7d', value: o.counts?.signups7Days, colour: 'text-purple-300' },
+            { label: 'Signups 30d', value: o.counts?.signups30Days, colour: 'text-purple-300' },
+            { label: 'Active subs', value: o.subscriptions?.byStatus?.active ?? 0, colour: 'text-emerald-400' },
+            { label: 'AI reports', value: o.counts?.aiReports, colour: 'text-rose-400' },
+            { label: 'Feedback', value: o.counts?.feedback, colour: 'text-amber-300' },
+          ];
+        },
+
+        init() {
+          const wire = () => {
+            window.__moksha.onAuth((u) => {
+              this.user = u;
+              if (!u) {
+                this.phase = 'login';
+              } else {
+                this.checkAdminAndLoad();
+              }
+            });
+          };
+          if (window.__moksha) wire();
+          else window.addEventListener('firebase-ready', wire, { once: true });
+        },
+
+        async signIn() {
+          this.loading = true;
+          this.error = '';
+          try {
+            await window.__moksha.signIn();
+          } catch (e) {
+            this.error = e.message || String(e);
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async signOutClick() {
+          await window.__moksha.signOut();
+          this.phase = 'login';
+          this.overview = null;
+          this.reports = [];
+          this.feedback = [];
+          this.lookupResult = null;
+        },
+
+        async fetchApi(path, opts = {}) {
+          const token = await window.__moksha.getToken();
+          return fetch(path, {
+            ...opts,
+            headers: {
+              'Authorization': 'Bearer ' + token,
+              'Content-Type': 'application/json',
+              ...(opts.headers || {}),
+            },
+          });
+        },
+
+        async checkAdminAndLoad() {
+          this.loading = true;
+          this.error = '';
+          try {
+            const r = await this.fetchApi('/admin/api/overview');
+            if (r.status === 403) {
+              this.phase = 'denied';
+              return;
+            }
+            if (!r.ok) {
+              this.error = 'Server returned ' + r.status;
+              return;
+            }
+            this.overview = await r.json();
+            this.phase = 'app';
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async switchTab(t) {
+          this.tab = t;
+          this.error = '';
+          if (t === 'overview' && !this.overview) await this.checkAdminAndLoad();
+          if (t === 'reports' && this.reports.length === 0) await this.loadReports();
+          if (t === 'feedback' && this.feedback.length === 0) await this.loadFeedback();
+        },
+
+        async loadReports() {
+          this.loading = true;
+          try {
+            const r = await this.fetchApi('/admin/api/reports?limit=100');
+            const d = await r.json();
+            this.reports = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async markReviewed(id) {
+          await this.fetchApi('/admin/api/reports/' + encodeURIComponent(id) + '/reviewed', { method: 'POST' });
+          await this.loadReports();
+        },
+
+        async deleteReport(id) {
+          if (!confirm('Delete this report permanently?')) return;
+          await this.fetchApi('/admin/api/reports/' + encodeURIComponent(id), { method: 'DELETE' });
+          await this.loadReports();
+        },
+
+        async loadFeedback() {
+          this.loading = true;
+          try {
+            const r = await this.fetchApi('/admin/api/feedback?limit=100');
+            const d = await r.json();
+            this.feedback = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async doLookup() {
+          if (!this.lookupQuery.trim()) return;
+          this.loading = true;
+          this.error = '';
+          this.lookupAttempted = true;
+          this.lookupResult = null;
+          try {
+            const q = this.lookupQuery.trim();
+            const isUid = q.length > 20 && !q.includes('@');
+            const url = isUid
+              ? '/admin/api/user/lookup?uid=' + encodeURIComponent(q)
+              : '/admin/api/user/lookup?email=' + encodeURIComponent(q);
+            const r = await this.fetchApi(url);
+            if (r.status === 404) {
+              this.lookupResult = null;
+            } else if (r.ok) {
+              this.lookupResult = await r.json();
+            } else {
+              this.error = 'Lookup failed: ' + r.status;
+            }
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async togglePremium(grant) {
+          if (!this.lookupResult) return;
+          const who = this.lookupResult.email || this.lookupResult.uid;
+          if (!confirm((grant ? 'Grant' : 'Revoke') + ' premium for ' + who + '?')) return;
+          this.loading = true;
+          try {
+            const r = await this.fetchApi('/admin/api/user/' + encodeURIComponent(this.lookupResult.uid) + '/premium', {
+              method: 'POST',
+              body: JSON.stringify({ isPremium: grant }),
+            });
+            if (!r.ok) {
+              const d = await r.json().catch(() => ({}));
+              this.error = d.error || 'Update failed: ' + r.status;
+            }
+            await this.doLookup();
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        formatTime(iso) {
+          if (!iso) return '';
+          const d = new Date(iso);
+          if (isNaN(d.getTime())) return '';
+          const now = Date.now();
+          const diff = now - d.getTime();
+          const m = Math.floor(diff / 60000);
+          if (m < 1) return 'just now';
+          if (m < 60) return m + 'm ago';
+          const h = Math.floor(m / 60);
+          if (h < 24) return h + 'h ago';
+          const days = Math.floor(h / 24);
+          if (days < 30) return days + 'd ago';
+          return d.toLocaleDateString();
+        },
+      };
+    }
+  </script>
+</body>
+</html>
