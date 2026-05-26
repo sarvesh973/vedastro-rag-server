@@ -276,6 +276,54 @@ if (!isRazorpayConfigured) {
   console.warn('[Razorpay] keys not set — subscription endpoints will return 503 until configured');
 }
 
+// Auto-close unbalanced { and [ in a JSON-ish string. Gemini sometimes
+// truncates a response mid-array or mid-object — closing the openers in
+// reverse order is usually enough to rescue the structure.
+//
+// Walks character-by-character respecting string literals + escapes so
+// braces/brackets inside strings don't confuse the counter.
+function balanceJsonBrackets(s) {
+  if (!s || typeof s !== 'string') return s;
+  const stack = [];
+  let inStr = false, esc = false;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      out += c;
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { out += c; inStr = true; continue; }
+    if (c === '{' || c === '[') { stack.push(c); out += c; continue; }
+    if (c === '}' || c === ']') {
+      const top = stack[stack.length - 1];
+      if ((c === '}' && top === '{') || (c === ']' && top === '[')) {
+        stack.pop();
+        out += c;
+      } else if (top) {
+        // Mismatched closer (e.g. `}` while still inside an array) —
+        // auto-close the inner container first, then re-process this
+        // character against the now-exposed parent.
+        out += top === '{' ? '}' : ']';
+        stack.pop();
+        i--;
+      }
+      // No opener at all → drop the stray closer.
+      continue;
+    }
+    out += c;
+  }
+  out = out.replace(/,(\s*)$/, '$1');
+  while (stack.length) {
+    const opener = stack.pop();
+    out += opener === '{' ? '}' : ']';
+  }
+  return out;
+}
+
 // =========================================
 // CONVERSATION STORE (in-memory admin log)
 // =========================================
@@ -1551,15 +1599,20 @@ app.post('/chat', async (req, res) => {
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
+    // Gemini occasionally returns truncated/unbalanced JSON (e.g. missing
+    // a closing `]` for the details array before the final `}`). We try
+    // a strict parse first, then a bracket-balanced retry, then fall back.
     let summary = [];
     let details = [];
-    try {
-      const clean = raw.replace(/```json?/gi, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(clean);
-      if (Array.isArray(parsed.summary)) {
+    const clean = raw.replace(/```json?/gi, '').replace(/```/g, '').trim();
+
+    const applyParsed = (parsed) => {
+      let ok = false;
+      if (parsed && Array.isArray(parsed.summary)) {
         summary = parsed.summary.map(x => String(x).trim()).filter(Boolean);
+        ok = summary.length > 0;
       }
-      if (Array.isArray(parsed.details)) {
+      if (parsed && Array.isArray(parsed.details)) {
         details = parsed.details
           .filter(d => d && (d.chapter || d.explanation))
           .map(d => ({
@@ -1567,9 +1620,30 @@ app.post('/chat', async (req, res) => {
             explanation: String(d.explanation || '').trim(),
           }));
       }
+      return ok;
+    };
+
+    let parsedOk = false;
+    try {
+      parsedOk = applyParsed(JSON.parse(clean));
     } catch (e) {
-      console.warn('[chat] JSON parse failed, prose fallback:', e.message);
+      console.warn('[chat] strict JSON parse failed:', e.message);
     }
+
+    if (!parsedOk) {
+      // Bracket-balance: count unmatched openers (ignoring those inside
+      // string literals), append the missing closers in correct order.
+      try {
+        const balanced = balanceJsonBrackets(clean);
+        if (balanced !== clean) {
+          parsedOk = applyParsed(JSON.parse(balanced));
+          if (parsedOk) console.log('[chat] recovered via bracket-balance');
+        }
+      } catch (e2) {
+        console.warn('[chat] balanced retry also failed:', e2.message);
+      }
+    }
+
     if (summary.length === 0) {
       summary = [raw.trim()];
       details = [];
