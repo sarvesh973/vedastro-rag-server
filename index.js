@@ -1883,6 +1883,9 @@ app.get('/admin', (req, res) => {
         path.join(__dirname, 'admin_v2.html'), 'utf8');
     }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // Tell browsers to always revalidate — without this, Chrome
+    // aggressively caches the HTML and admins miss deploys.
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.send(_adminHtmlCache);
   } catch (e) {
     res.status(500).send('Failed to load dashboard: ' + e.message);
