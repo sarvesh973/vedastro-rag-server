@@ -191,6 +191,129 @@
           </div>
         </section>
 
+        <!-- ── SIGNUPS ── -->
+        <section x-show="tab === 'signups'">
+          <div class="flex items-center justify-between gap-3 mb-4">
+            <input x-model="signupQuery" placeholder="Filter by email, name, phone, uid…"
+              class="flex-1 max-w-md bg-slate-900 border border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500">
+            <div class="text-sm text-slate-400">
+              <span x-text="filteredSignups.length"></span> of <span x-text="signups.length"></span>
+            </div>
+            <button @click="loadSignups()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+          </div>
+          <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+          <div x-show="!loading && signups.length === 0" class="text-center py-16 text-slate-500">No signups yet.</div>
+          <div class="rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-950 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th class="px-3 py-2 text-left">User</th>
+                  <th class="px-3 py-2 text-left">Provider</th>
+                  <th class="px-3 py-2 text-left">Signed up</th>
+                  <th class="px-3 py-2 text-left">Last seen</th>
+                  <th class="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="u in filteredSignups" :key="u.uid">
+                  <tr class="border-t border-slate-800 hover:bg-slate-800/40">
+                    <td class="px-3 py-2">
+                      <div class="font-medium text-slate-200" x-text="u.displayName || u.email || u.phoneNumber || u.uid.slice(0, 12)"></div>
+                      <div class="text-xs text-slate-500 font-mono" x-text="u.email || u.phoneNumber || u.uid.slice(0, 16)"></div>
+                    </td>
+                    <td class="px-3 py-2">
+                      <span class="text-xs px-2 py-0.5 rounded"
+                        :class="u.provider === 'google' ? 'bg-blue-950 text-blue-300'
+                              : u.provider === 'phone' ? 'bg-emerald-950 text-emerald-300'
+                              : u.provider === 'email' ? 'bg-purple-950 text-purple-300'
+                              : 'bg-slate-800 text-slate-400'"
+                        x-text="u.provider"></span>
+                      <span x-show="u.disabled" class="ml-1 text-xs px-2 py-0.5 rounded bg-rose-950 text-rose-300">disabled</span>
+                    </td>
+                    <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(u.createdAt)"></td>
+                    <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(u.lastSignInAt)"></td>
+                    <td class="px-3 py-2 text-right">
+                      <button @click="jumpToLookup(u.uid)" class="text-xs text-purple-300 hover:text-purple-200 underline">View</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ── SUBSCRIPTIONS ── -->
+        <section x-show="tab === 'subs'">
+          <div x-show="subsSummary" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
+            <template x-for="key in ['total','active','trialing','cancelled','expired','paused','halted']" :key="key">
+              <button @click="subsFilter = (key === 'total' ? 'all' : key)"
+                :class="(subsFilter === key || (key === 'total' && subsFilter === 'all'))
+                          ? 'border-purple-500 bg-slate-800'
+                          : 'border-slate-800 bg-slate-900 hover:border-slate-700'"
+                class="p-3 rounded-lg border text-left transition">
+                <div class="text-xs text-slate-500 uppercase tracking-wide" x-text="key"></div>
+                <div class="text-xl font-bold"
+                  :class="key === 'active' || key === 'trialing' ? 'text-emerald-400'
+                        : key === 'cancelled' || key === 'expired' || key === 'halted' ? 'text-rose-400'
+                        : key === 'paused' ? 'text-amber-300'
+                        : 'text-purple-300'"
+                  x-text="(subsSummary && subsSummary[key]) ?? 0"></div>
+              </button>
+            </template>
+          </div>
+
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-sm text-slate-400">
+              <span x-text="filteredSubs.length"></span> shown
+              <span x-show="subsFilter !== 'all'" class="text-slate-500"> · filtered by <span x-text="subsFilter" class="text-purple-300"></span></span>
+            </div>
+            <button @click="loadSubscriptions()" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">Refresh</button>
+          </div>
+
+          <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
+          <div x-show="!loading && subscriptions.length === 0" class="text-center py-16 text-slate-500">No subscriptions on record yet.</div>
+          <div class="rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-950 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th class="px-3 py-2 text-left">User</th>
+                  <th class="px-3 py-2 text-left">Plan</th>
+                  <th class="px-3 py-2 text-left">Status</th>
+                  <th class="px-3 py-2 text-left">Period ends</th>
+                  <th class="px-3 py-2 text-left">Cancelled</th>
+                  <th class="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="s in filteredSubs" :key="s.uid + s.status">
+                  <tr class="border-t border-slate-800 hover:bg-slate-800/40">
+                    <td class="px-3 py-2">
+                      <div class="font-medium text-slate-200" x-text="s.email || s.uid.slice(0, 16)"></div>
+                      <div class="text-xs text-slate-500 font-mono" x-text="s.razorpaySubscriptionId || s.uid.slice(0, 16)"></div>
+                    </td>
+                    <td class="px-3 py-2">
+                      <span class="text-xs font-mono text-purple-300" x-text="s.plan || '—'"></span>
+                    </td>
+                    <td class="px-3 py-2">
+                      <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
+                        :class="s.status === 'active' || s.status === 'trialing' ? 'bg-emerald-950 text-emerald-300'
+                              : s.status === 'cancelled' || s.status === 'expired' || s.status === 'halted' ? 'bg-rose-950 text-rose-300'
+                              : s.status === 'paused' ? 'bg-amber-950 text-amber-300'
+                              : 'bg-slate-800 text-slate-400'"
+                        x-text="s.status"></span>
+                    </td>
+                    <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(s.currentPeriodEndsAt) || '—'"></td>
+                    <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(s.cancelledAt) || '—'"></td>
+                    <td class="px-3 py-2 text-right">
+                      <button @click="jumpToLookup(s.uid)" class="text-xs text-purple-300 hover:text-purple-200 underline">View</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- ── CHATS (global) ── -->
         <section x-show="tab === 'chats'">
           <div class="grid lg:grid-cols-3 gap-6">
@@ -441,6 +564,8 @@
         tab: 'overview',
         tabs: [
           { id: 'overview', label: 'Overview', icon: '📊' },
+          { id: 'signups', label: 'Signups', icon: '👥' },
+          { id: 'subs', label: 'Subscriptions', icon: '💎' },
           { id: 'reports', label: 'AI Reports', icon: '🚩' },
           { id: 'feedback', label: 'Feedback', icon: '📝' },
           { id: 'chats', label: 'Chats', icon: '💬' },
@@ -449,6 +574,11 @@
         overview: null,
         reports: [],
         feedback: [],
+        signups: [],
+        signupQuery: '',
+        subscriptions: [],
+        subsSummary: null,
+        subsFilter: 'all',
         recentChats: [],
         topUsers: [],
         topUsersDays: 7,
@@ -552,6 +682,8 @@
           if (t === 'reports' && this.reports.length === 0) await this.loadReports();
           if (t === 'feedback' && this.feedback.length === 0) await this.loadFeedback();
           if (t === 'chats' && this.recentChats.length === 0) await this.loadChatsTab();
+          if (t === 'signups' && this.signups.length === 0) await this.loadSignups();
+          if (t === 'subs' && this.subscriptions.length === 0) await this.loadSubscriptions();
         },
 
         async loadReports() {
@@ -618,6 +750,52 @@
           } finally {
             this.loading = false;
           }
+        },
+
+        async loadSignups() {
+          this.loading = true;
+          this.error = '';
+          try {
+            const r = await this.fetchApi('/admin/api/signups?limit=2000');
+            const d = await r.json();
+            if (!r.ok) { this.error = d.error || 'Failed: ' + r.status; return; }
+            this.signups = d.items || [];
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async loadSubscriptions() {
+          this.loading = true;
+          this.error = '';
+          try {
+            const r = await this.fetchApi('/admin/api/subscriptions?limit=2000');
+            const d = await r.json();
+            if (!r.ok) { this.error = d.error || 'Failed: ' + r.status; return; }
+            this.subscriptions = d.items || [];
+            this.subsSummary = d.summary || null;
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        get filteredSignups() {
+          const q = this.signupQuery.trim().toLowerCase();
+          if (!q) return this.signups;
+          return this.signups.filter(u =>
+            (u.email || '').toLowerCase().includes(q) ||
+            (u.displayName || '').toLowerCase().includes(q) ||
+            (u.phoneNumber || '').toLowerCase().includes(q) ||
+            (u.uid || '').toLowerCase().includes(q));
+        },
+
+        get filteredSubs() {
+          if (this.subsFilter === 'all') return this.subscriptions;
+          return this.subscriptions.filter(s => s.status === this.subsFilter);
         },
 
         async loadChatsTab() {
