@@ -468,6 +468,127 @@ function findRelevantChunks(queryEmbedding, chunks, topK = 8) {
   return scored.slice(0, topK);
 }
 
+// ─────────── RAG SIGNAL ENHANCEMENT ───────────
+//
+// Goal: make the retrieval pull more topically-relevant chunks from the
+// 549 indexed chunks (BPHS + Phaladeepika), without changing the corpus.
+//
+// Three signal upgrades layered on top of plain cosine similarity:
+//
+// 1. detectQuestionTopics(question) — classify the user's free-text
+//    question into one or more astrology domains by keyword (career,
+//    marriage, finance, health, children, spirituality, foreign, etc.)
+//    Each domain maps to a vocab pack: classical Sanskrit terms +
+//    relevant house numbers + planet names known from the shastras.
+//
+// 2. buildEnrichedQuery(question, chartData, topics) — concatenates
+//    the user's literal text + chart facts + topic vocab. This is what
+//    becomes the embedding query. Wider vocab => more BPHS / Phaladeepika
+//    chunks score high on cosine, because the indexed text uses the same
+//    Sanskrit/house terminology.
+//
+// 3. fetchAndDiversify(...) — pull TOP_K * 3 candidates first, then
+//    apply MMR (Maximal Marginal Relevance) — pick chunks that are both
+//    relevant AND distinct from each other. Prevents 8 results all
+//    being from the same chapter when the question spans topics.
+
+const TOPIC_VOCAB = {
+  career: 'career profession job work karma karya 10th house dasamsa Saturn Mercury Sun Mars Karmesh dignity dasha bhukti professional success vocational rajyog',
+  marriage: 'marriage spouse partner relationship Kalatra wife husband 7th house saptamesh navamsha D9 Venus Jupiter Mars Mangal dosha vivah sukha kalathra bhava',
+  finance: 'wealth money finance dhana 2nd house 11th house labha Jupiter Mercury Venus dhanesh Lakshmi Kubera artha lakshmi yoga prosperity affluence',
+  health: 'health body sickness disease 6th house ari Mars Sun Saturn Rahu Ketu roga arishta longevity arogya immunity ailment',
+  children: 'children child progeny putra 5th house panchamesh Jupiter Sun Moon putra bhava santati offspring fertility',
+  spirituality: 'spirituality moksha dharma 9th house 12th house Jupiter Ketu vimshamsha D20 sadhana meditation devotion gyana pilgrimage tapasya guru bhakti',
+  foreign: 'foreign travel abroad relocation 12th house 9th house Rahu Mercury Saturn videsh yatra migration overseas pravas',
+  education: 'education learning study vidya 4th house 5th house Mercury Jupiter Saraswati gyana research scholar academics',
+  family: 'family mother father siblings 4th house 3rd house parents matri pitri Moon Sun Mars sukhabhava parivar relatives',
+  litigation: 'litigation enemies dispute legal 6th house 8th house Mars Saturn Rahu shatru opponents court case lawsuit conflict',
+  longevity: 'longevity lifespan age 1st house 8th house Saturn Mars ayur balarishta arishta yoga life span vitality',
+  remedies: 'remedies upay mantra gemstone fasting daan donation puja worship parihara propitiation karmaphala spiritual practice',
+  timing: 'timing when dasha bhukti antardasha transit gochara sade sati specific period years kaal time prediction event',
+  personality: 'personality character nature swabhava 1st house lagna ascendant Sun Moon temperament aura disposition',
+  general: 'rajayoga dhanayoga vipreet jeevan life general overall future destiny prarabdha karma fate fortune bhagya'
+};
+
+function detectQuestionTopics(question) {
+  if (!question || typeof question !== 'string') return ['general'];
+  const q = question.toLowerCase();
+  const matches = [];
+
+  const triggers = {
+    career: /\b(career|job|work|profession|business|naukri|kaam|kaarya|karma|promotion|salary)\b/,
+    marriage: /\b(marriage|marry|wife|husband|partner|spouse|relationship|love|shaadi|vivah|girlfriend|boyfriend|divorce|breakup)\b/,
+    finance: /\b(money|wealth|rich|finance|financial|paisa|dhan|income|earnings|wealthy|debt|loan|investment|property)\b/,
+    health: /\b(health|sick|illness|disease|bimari|swasth|fitness|medical|surgery|pain|recovery|treatment)\b/,
+    children: /\b(child|children|baby|pregnant|pregnancy|bachcha|santan|santati|putra|son|daughter|conceive|fertility)\b/,
+    spirituality: /\b(spiritual|moksha|dharma|god|bhagwan|meditation|sadhana|guru|enlightenment|devotion|bhakti|temple|pilgrimage)\b/,
+    foreign: /\b(foreign|abroad|visa|videsh|country|migrate|migration|relocate|nri|overseas|usa|uk|canada|australia)\b/,
+    education: /\b(study|education|exam|college|university|degree|padhai|vidya|learning|course|research|phd|scholar)\b/,
+    family: /\b(family|mother|father|parent|maa|papa|mom|dad|brother|sister|bhai|behen|parivar|relative)\b/,
+    litigation: /\b(court|case|legal|lawsuit|enemy|shatru|dispute|fight|conflict|police|crime|punishment)\b/,
+    longevity: /\b(age|lifespan|long life|death|ayu|jeevan|live long|will i live)\b/,
+    remedies: /\b(remedy|remedies|upay|upaay|mantra|gemstone|stone|ratna|fast|vrat|puja|donation|daan|parihara|solution|cure|fix)\b/,
+    timing: /\b(when|kab|year|month|date|time|how long|after how|aaj|kal|abhi|future|jaldi|soon)\b/,
+    personality: /\b(personality|nature|character|swabhav|kaisa hu|kaisa hoon|kaisi hu|who am i|tell me about myself)\b/,
+  };
+
+  for (const [topic, re] of Object.entries(triggers)) {
+    if (re.test(q)) matches.push(topic);
+  }
+  return matches.length > 0 ? matches : ['general'];
+}
+
+function buildEnrichedQuery(question, chartData, topics) {
+  const parts = [question];
+
+  if (chartData) {
+    const planets = Object.entries(chartData.planets)
+      .map(([name, d]) => `${name} in ${d.sign} house ${d.house}`)
+      .join(', ');
+    parts.push(`${chartData.ascendant.sign} lagna`);
+    parts.push(`${chartData.dasha.mahadasha} mahadasha ${chartData.dasha.antardasha || ''} antardasha`);
+    parts.push(planets);
+  }
+
+  for (const topic of topics) {
+    if (TOPIC_VOCAB[topic]) parts.push(TOPIC_VOCAB[topic]);
+  }
+
+  return parts.join(' ').slice(0, 1500); // embedding model handles up to ~2048 tokens, leave headroom
+}
+
+// Maximal Marginal Relevance: select topK chunks that are both highly
+// relevant to the query AND diverse from each other. Prevents 8 nearly
+// identical chunks from the same BPHS chapter dominating the context.
+// lambda 0..1: 1 = pure relevance, 0 = pure diversity. 0.7 is a good
+// middle ground that keeps quality high but enforces some spread.
+function selectDiverseChunks(candidates, topK = 8, lambda = 0.7) {
+  if (candidates.length <= topK) return candidates;
+  const selected = [];
+  const remaining = candidates.slice();
+
+  // Always take the top-scoring one first.
+  selected.push(remaining.shift());
+
+  while (selected.length < topK && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const c = remaining[i];
+      // Max similarity to anything already picked.
+      let maxSimToSelected = 0;
+      for (const s of selected) {
+        const sim = cosineSimilarity(c.embedding, s.embedding);
+        if (sim > maxSimToSelected) maxSimToSelected = sim;
+      }
+      const mmr = lambda * c.score - (1 - lambda) * maxSimToSelected;
+      if (mmr > bestScore) { bestScore = mmr; bestIdx = i; }
+    }
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+  return selected;
+}
+
 // --- GEMINI HELPERS ---
 function getGenAI() {
   if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
@@ -1676,18 +1797,22 @@ app.post('/chat', async (req, res) => {
 
     const chunks = loadKnowledgeBase();
 
-    // Smart query: include chart context for better RAG search
-    let searchQuery = question;
-    if (chartData) {
-      // Enhance search with relevant planetary info
-      const planets = Object.entries(chartData.planets)
-        .map(([name, data]) => `${name} in ${data.sign} house ${data.house}`)
-        .join(', ');
-      searchQuery = `${question} ${chartData.ascendant.sign} lagna ${chartData.dasha.mahadasha} dasha ${planets}`;
-    }
+    // Topic detection + enriched query (see TOPIC_VOCAB / detectQuestionTopics
+    // above). Embeds the user's question together with classical-Sanskrit
+    // topic vocabulary so chunks in BPHS/Phaladeepika that use those terms
+    // score higher on cosine similarity. Falls back gracefully to plain
+    // question text when no topic matches.
+    const topics = detectQuestionTopics(question);
+    const enrichedQuery = buildEnrichedQuery(question, chartData, topics);
+    console.log(`[chat] topics=[${topics.join(',')}] query.len=${enrichedQuery.length}`);
 
-    const queryEmbedding = await getQueryEmbedding(searchQuery.substring(0, 500));
-    const relevant = findRelevantChunks(queryEmbedding, chunks, 8);
+    const queryEmbedding = await getQueryEmbedding(enrichedQuery);
+
+    // Fetch wider net (24 candidates), then MMR-diversify down to 8 so
+    // multi-topic questions don't get 8 near-duplicate chunks from one chapter.
+    const candidates = findRelevantChunks(queryEmbedding, chunks, 24);
+    const relevant = selectDiverseChunks(candidates, 8, 0.7);
+    console.log(`[chat] picked ${relevant.length} chunks, top score=${(candidates[0]?.score || 0).toFixed(3)}, books=${[...new Set(relevant.map(c => c.book))].join('+')}`);
     const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData, (req.body && req.body.language) || 'hinglish');
     const raw = await generateResponse(prompt);
 
