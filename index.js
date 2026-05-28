@@ -561,6 +561,68 @@ function buildEnrichedQuery(question, chartData, topics) {
   return parts.join(' ').slice(0, 1500); // embedding model handles up to ~2048 tokens, leave headroom
 }
 
+// LLM-based question classifier. Uses gemini-2.5-flash-lite (cheap +
+// fast: ~300ms, ~$0.0001 per call). Returns a structured analysis
+// of the question that drives both retrieval AND answer focus:
+//
+//   {
+//     topic: "marriage_timing" | "career_change" | "property_purchase" | ...
+//     vocab: "specific Sanskrit/house/planet keywords to embed",
+//     focus: "which chart factors to anchor the answer on",
+//     novelty: "what makes THIS question different from a generic one"
+//   }
+//
+// Why this beats regex: handles paraphrases, code-switching (Hinglish),
+// and combined questions ("career and marriage in 2026") without me
+// having to enumerate every possible phrasing. The focus field is the
+// critical bit — it tells the main answer prompt to anchor on (say)
+// the 10th lord and Dasamsa for a career question, instead of just
+// defaulting to current dasha which makes every answer feel the same.
+async function classifyQuestionWithLLM(question, chartData) {
+  if (!question || !GEMINI_API_KEY) return null;
+
+  const chartSummary = chartData ? (
+    `Ascendant: ${chartData.ascendant.sign}. ` +
+    `Current dasha: ${chartData.dasha.mahadasha}-${chartData.dasha.antardasha}. ` +
+    `Key placements: ${Object.entries(chartData.planets)
+      .map(([n, d]) => `${n} in ${d.sign} house ${d.house}`)
+      .slice(0, 5).join(', ')}.`
+  ) : 'No chart available.';
+
+  const prompt = `You are an expert Vedic astrologer routing a user's question to the right shastra chapters. Reply ONLY with a JSON object, no markdown.
+
+User question: "${question}"
+
+User's chart context: ${chartSummary}
+
+Return this exact JSON shape:
+{
+  "topic": "<one specific astrology sub-topic, e.g. marriage_timing, marriage_partner_nature, career_business_vs_job, career_promotion, career_change, finance_property, finance_debt, finance_wealth, finance_speculation, health_chronic, health_surgery, mental_health, family_mother, family_father, family_siblings, family_inlaws, children_conception, children_welfare, education_higher, education_exam_result, spirituality_path, spirituality_guru, foreign_settle, foreign_short_travel, longevity, remedies_general, remedies_marriage, romance, breakup_recovery, general>",
+  "vocab": "<15-25 Sanskrit/English keywords classical Vedic texts use for THIS specific topic: relevant house numbers, planets, karakas, yogas, divisional charts. Be specific. Example for 'career_business': 'business entrepreneur 3rd house 7th house 10th house Mercury Mars Jupiter parakrama vyaya rajayoga svatantra independent venture'>",
+  "focus": "<a one-sentence instruction telling the answering astrologer which chart factor(s) to anchor the prediction on, e.g. '7th lord and its placement in D9, plus Venus dignity' or '10th house lord, Dasamsa, current dasha lord effect on career sectors'>",
+  "tone": "<one word: serious|hopeful|cautious|neutral|empathetic — based on the emotional weight of the question>"
+}`;
+
+  try {
+    const genAI = getGenAI();
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().replace(/```json?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.topic === 'string') {
+      return {
+        topic: parsed.topic,
+        vocab: String(parsed.vocab || ''),
+        focus: String(parsed.focus || ''),
+        tone: String(parsed.tone || 'neutral'),
+      };
+    }
+  } catch (e) {
+    console.warn('[chat] LLM classifier failed:', e.message.slice(0, 120));
+  }
+  return null;
+}
+
 // Maximal Marginal Relevance: select topK chunks that are both highly
 // relevant to the query AND diverse from each other. Prevents 8 nearly
 // identical chunks from the same BPHS chapter dominating the context.
@@ -1075,7 +1137,17 @@ function languageDirective(language) {
     'Never use Devanagari script.';
 }
 
-function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language) {
+function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language, classifier) {
+  const focus = classifier && classifier.focus ? classifier.focus : '';
+  const tone = classifier && classifier.tone ? classifier.tone : 'neutral';
+  const topic = classifier && classifier.topic ? classifier.topic : 'general';
+  const focusBlock = focus
+    ? `QUESTION-SPECIFIC FOCUS (REQUIRED — anchor your reasoning here, do NOT default to current dasha for every answer):
+${focus}
+Tone for THIS reply: ${tone}.
+Sub-topic: ${topic}.
+`
+    : '';
   const versesContext = relevantChunks
     .map((c, i) => `[Source ${i + 1}: ${c.book} Ch.${c.chapter} "${c.chapter_name}", Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
@@ -1159,6 +1231,9 @@ RULES FOR THE JSON:
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
+- VARY your chart references per question type — do NOT anchor every answer on the current Mahadasha/Antardasha. Career questions should foreground the 10th lord and Dasamsa. Marriage should foreground the 7th lord and Navamsha. Health should foreground the 6th lord and ascendant. Property the 4th lord. Education the 4th + 5th lords. Children the 5th lord and Jupiter. Only mention current dasha when it is genuinely the strongest signal for that specific question.
+- If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
+- If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
 - Keep the total content (all summary + all explanations) under ~320 words.
 - Never predict death, severe illness, or create fear.
 - Do NOT add a remedy unless the user explicitly asks for remedies / upay /
@@ -1180,6 +1255,7 @@ CONVERSATION RULES:
 ${profileContext}
 ${chartContext}
 
+${focusBlock}
 ${historyContext}
 
 REFERENCE VERSES (use these for accuracy — DO NOT cite them by name in your reply):
@@ -1823,23 +1899,49 @@ app.post('/chat', async (req, res) => {
 
     const chunks = loadKnowledgeBase();
 
-    // Topic detection + enriched query (see TOPIC_VOCAB / detectQuestionTopics
-    // above). Embeds the user's question together with classical-Sanskrit
-    // topic vocabulary so chunks in BPHS/Phaladeepika that use those terms
-    // score higher on cosine similarity. Falls back gracefully to plain
-    // question text when no topic matches.
-    const topics = detectQuestionTopics(question);
-    const enrichedQuery = buildEnrichedQuery(question, chartData, topics);
-    console.log(`[chat] topics=[${topics.join(',')}] query.len=${enrichedQuery.length}`);
+    // LLM-based classifier (gemini-flash-lite, ~$0.0001 + ~300ms).
+    // Returns specific topic, tailored vocab, AND a 'focus' instruction
+    // telling the main answering model which chart factor to anchor on.
+    // The focus is what stops every answer defaulting to current dasha.
+    // Falls back to the regex classifier if the LLM call fails, so the
+    // chat never breaks on classifier errors.
+    let llmClass = await classifyQuestionWithLLM(question, chartData);
+    let topics, enrichedQuery, focusInstruction = '', toneHint = 'neutral';
+
+    if (llmClass) {
+      topics = [llmClass.topic];
+      // Build the enriched query from the LLM's tailored vocab instead of
+      // a hardcoded pack — much more precise.
+      const parts = [question];
+      if (chartData) {
+        parts.push(`${chartData.ascendant.sign} lagna`);
+        parts.push(`${chartData.dasha.mahadasha} mahadasha ${chartData.dasha.antardasha || ''} antardasha`);
+        parts.push(Object.entries(chartData.planets)
+          .map(([n, d]) => `${n} in ${d.sign} house ${d.house}`).join(', '));
+      }
+      if (llmClass.vocab) parts.push(llmClass.vocab);
+      enrichedQuery = parts.join(' ').slice(0, 1500);
+      focusInstruction = llmClass.focus || '';
+      toneHint = llmClass.tone || 'neutral';
+      console.log(`[chat] LLM-class topic=${llmClass.topic} tone=${toneHint} focus="${focusInstruction.slice(0, 80)}"`);
+    } else {
+      // Regex fallback (existing behavior)
+      topics = detectQuestionTopics(question);
+      enrichedQuery = buildEnrichedQuery(question, chartData, topics);
+      console.log(`[chat] regex-fallback topics=[${topics.join(',')}]`);
+    }
 
     const queryEmbedding = await getQueryEmbedding(enrichedQuery);
 
-    // Fetch wider net (24 candidates), then MMR-diversify down to 8 so
-    // multi-topic questions don't get 8 near-duplicate chunks from one chapter.
+    // Fetch wider net (24 candidates), then MMR-diversify down to 8.
     const candidates = findRelevantChunks(queryEmbedding, chunks, 24);
     const relevant = selectDiverseChunks(candidates, 8, 0.7);
     console.log(`[chat] picked ${relevant.length} chunks, top score=${(candidates[0]?.score || 0).toFixed(3)}, books=${[...new Set(relevant.map(c => c.book))].join('+')}`);
-    const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData, (req.body && req.body.language) || 'hinglish');
+    const prompt = buildChatPrompt(
+      question, relevant, userProfile, chatHistory, chartData,
+      (req.body && req.body.language) || 'hinglish',
+      { focus: focusInstruction, tone: toneHint, topic: topics[0] || 'general' },
+    );
     const raw = await generateResponse(prompt);
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
