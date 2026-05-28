@@ -805,24 +805,76 @@ async function geocodePlace(placeName) {
     return cities[key];
   }
 
-  // Try online geocoding via Nominatim (free, no key needed)
+  // Try LocationIQ first (5k/day free, 60 req/min — way more headroom
+  // than Nominatim's 1 req/sec). Falls back to Nominatim if no key set
+  // or LocationIQ returns nothing/errors.
+  if (process.env.LOCATIONIQ_API_KEY) {
+    const liq = await _geocodeLocationIQ(placeName);
+    if (liq) {
+      _cacheSet(key, liq);
+      return liq;
+    }
+    // LocationIQ returned no match — fall through to Nominatim as a
+    // second opinion before we negative-cache.
+  }
+
+  const nom = await _geocodeNominatim(placeName);
+  if (nom) {
+    _cacheSet(key, nom);
+    return nom;
+  }
+
+  // Both geocoders came up empty / failed without exception.
+  // Negative-cache to spare quota on repeat lookups for the same typo.
+  _cacheSet(key, null);
+  return null;
+}
+
+// LocationIQ search — pk.* API key, JSON response shape compatible
+// with Nominatim. Returns {lat, lon} on success, null otherwise.
+async function _geocodeLocationIQ(placeName) {
+  const https = require('https');
+  const key = process.env.LOCATIONIQ_API_KEY;
+  if (!key) return null;
+  const url = `https://us1.locationiq.com/v1/search?key=${encodeURIComponent(key)}` +
+    `&q=${encodeURIComponent(placeName + ', India')}&format=json&limit=1`;
   try {
-    const https = require('https');
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(placeName + ', India')}&format=jsonv2&limit=1`;
+    const body = await new Promise((resolve, reject) => {
+      https.get(url, { headers: { 'Accept': 'application/json' } }, (res) => {
+        let buf = '';
+        res.on('data', (c) => (buf += c));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            console.warn(`[geocode] LocationIQ ${res.statusCode} for "${placeName}":`, buf.slice(0, 200));
+            return resolve(null);
+          }
+          resolve(buf);
+        });
+      }).on('error', reject);
+    });
+    if (!body) return null;
+    const data = JSON.parse(body);
+    if (Array.isArray(data) && data.length > 0) {
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+    }
+  } catch (e) {
+    console.warn('[geocode] LocationIQ error for "' + placeName + '":', e.message);
+  }
+  return null;
+}
+
+// Nominatim fallback — free, 1 req/sec, occasional 429.
+// Kept around so the server still works without a LocationIQ key.
+async function _geocodeNominatim(placeName) {
+  const https = require('https');
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(placeName + ', India')}&format=jsonv2&limit=1`;
+  try {
     const data = await new Promise((resolve, reject) => {
-      // Nominatim's abuse policy requires a real, identifying User-Agent
-      // and <= 1 req/sec. They return an XML/HTML error page (not JSON)
-      // when rate-limiting OR when the User-Agent looks generic — that's
-      // what crashed the process: JSON.parse on XML threw synchronously
-      // inside this callback (where the outer try/catch can't see it),
-      // bubbling up as an uncaught exception that killed Node and forced
-      // a 502 + restart on every /chart call.
       https.get(
         url,
         {
           headers: {
-            'User-Agent':
-              'Moksha/1.1 (https://github.com/sarvesh973/vedastro-rag-server; support@vedastro.ai)',
+            'User-Agent': 'Moksha/1.1 (https://github.com/sarvesh973/vedastro-rag-server; support@vedastro.ai)',
             'Accept': 'application/json',
           },
         },
@@ -830,42 +882,25 @@ async function geocodePlace(placeName) {
           let body = '';
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
-            // Always resolve safely — let the caller decide. Throwing in
-            // this callback would crash Node (the original bug).
             if (res.statusCode !== 200) {
-              console.warn(
-                `[geocode] Nominatim ${res.statusCode} for "${placeName}":`,
-                body.slice(0, 200),
-              );
+              console.warn(`[geocode] Nominatim ${res.statusCode} for "${placeName}":`, body.slice(0, 200));
               return resolve([]);
             }
-            try {
-              resolve(JSON.parse(body));
-            } catch (e) {
-              console.warn(
-                `[geocode] Nominatim returned non-JSON for "${placeName}" — ` +
-                  `first 200 chars: ${body.slice(0, 200)}`,
-              );
+            try { resolve(JSON.parse(body)); }
+            catch (e) {
+              console.warn(`[geocode] Nominatim returned non-JSON for "${placeName}" — first 200 chars: ${body.slice(0, 200)}`);
               resolve([]);
             }
           });
         },
       ).on('error', reject);
     });
-
     if (Array.isArray(data) && data.length > 0) {
-      const result = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
-      _cacheSet(key, result);
-      return result;
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
     }
-    // Empty array = Nominatim found nothing. Negative-cache so we don't
-    // keep asking for the same impossible spelling.
-    _cacheSet(key, null);
   } catch (e) {
     console.log('Geocoding failed:', e.message);
-    // Don't cache on transient errors (network) — next call should retry.
   }
-
   return null;
 }
 
