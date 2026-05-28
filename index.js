@@ -1905,6 +1905,16 @@ app.get('/admin/config', (req, res) => {
 // ─── /admin/api/* JSON endpoints (Firebase Auth + isAdmin gated) ──
 
 // GET /admin/api/overview — counts, signups, subscription breakdown.
+//
+// Data-location notes (real Firestore paths used by the mobile app):
+//   - Users:         users/{uid}                              (saveProfile)
+//   - Feedback:      feedback/{auto}                          (top-level)
+//   - AI reports:    ai_reports/{auto}                        (top-level)
+//   - Subscriptions: users/{uid}/subscription/current         (SUBCOLLECTION,
+//                    written by Razorpay webhook). There is no top-level
+//                    `subscriptions` collection — must use collectionGroup.
+//   - Signup time:   Firebase Auth metadata.creationTime — user docs
+//                    don't have a stable `createdAt` field.
 app.get('/admin/api/overview', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
@@ -1915,32 +1925,63 @@ app.get('/admin/api/overview', async (req, res) => {
       firestoreDb.collection('ai_reports').count().get(),
     ]);
 
-    // Signups in last 7 / 30 days. `createdAt` may not exist on every
-    // user doc (older entries) — that's fine, the count just excludes
-    // them. Wrap in catch so a missing index returns null instead of
-    // tanking the whole overview.
-    const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const [signups7, signups30] = await Promise.all([
-      firestoreDb.collection('users').where('createdAt', '>', sevenDaysAgo)
-        .count().get().then(s => s.data().count).catch(() => null),
-      firestoreDb.collection('users').where('createdAt', '>', thirtyDaysAgo)
-        .count().get().then(s => s.data().count).catch(() => null),
-    ]);
+    // Signups in last 7 / 30 days — page through Firebase Auth.
+    // listUsers is cheap at this scale (51 users) and gives us the real
+    // account creation time, not the profile-update timestamp.
+    const now = Date.now();
+    const SEVEN  = 7  * 24 * 60 * 60 * 1000;
+    const THIRTY = 30 * 24 * 60 * 60 * 1000;
+    let signups7 = 0, signups30 = 0;
+    if (firebaseAdmin) {
+      try {
+        let nextPageToken = undefined;
+        do {
+          const page = await firebaseAdmin.auth().listUsers(1000, nextPageToken);
+          for (const u of page.users) {
+            const created = u.metadata && u.metadata.creationTime
+              ? Date.parse(u.metadata.creationTime) : NaN;
+            if (!isFinite(created)) continue;
+            const age = now - created;
+            if (age <= SEVEN)  signups7++;
+            if (age <= THIRTY) signups30++;
+          }
+          nextPageToken = page.pageToken;
+        } while (nextPageToken);
+      } catch (e) {
+        console.warn('[admin/overview] listUsers failed:', e.message);
+        signups7 = null;
+        signups30 = null;
+      }
+    }
 
-    // Subscriptions breakdown — small collection so we iterate.
-    const subsSnap = await firestoreDb.collection('subscriptions').get();
+    // Subscriptions breakdown — they live at users/{uid}/subscription/current,
+    // so we use a collectionGroup query. Filter to docId == 'current' to
+    // avoid grabbing any historical revisions.
     const byPlan = { trial: 0, standard: 0, premium: 0 };
-    const byStatus = { active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, authenticated: 0, other: 0 };
-    subsSnap.forEach(doc => {
-      const d = doc.data();
-      const plan = (d.plan || d.planId || '').toLowerCase();
-      if (byPlan[plan] !== undefined) byPlan[plan]++;
-      const status = (d.status || 'other').toLowerCase();
-      if (byStatus[status] !== undefined) byStatus[status]++;
-      else byStatus.other++;
-    });
+    const byStatus = { active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, trialing: 0, authenticated: 0, other: 0 };
+    let subTotal = 0;
+    try {
+      const subsSnap = await firestoreDb.collectionGroup('subscription').get();
+      subsSnap.forEach(doc => {
+        if (doc.id !== 'current') return;
+        subTotal++;
+        const d = doc.data() || {};
+        // The webhook writes either { plan: 'standard' } or { planId: 'plan_xxx' }.
+        // We normalize common values; everything else falls through and is
+        // ignored (so we don't pollute the counts with stray plan_ ids).
+        const planRaw = String(d.plan || d.planId || '').toLowerCase();
+        if (planRaw.includes('premium')) byPlan.premium++;
+        else if (planRaw.includes('standard')) byPlan.standard++;
+        else if (planRaw.includes('trial')) byPlan.trial++;
+        else if (byPlan[planRaw] !== undefined) byPlan[planRaw]++;
+
+        const status = String(d.status || 'other').toLowerCase();
+        if (byStatus[status] !== undefined) byStatus[status]++;
+        else byStatus.other++;
+      });
+    } catch (e) {
+      console.warn('[admin/overview] subscriptions query failed:', e.message);
+    }
 
     res.json({
       counts: {
@@ -1951,7 +1992,7 @@ app.get('/admin/api/overview', async (req, res) => {
         signups30Days: signups30,
       },
       subscriptions: {
-        total: subsSnap.size,
+        total: subTotal,
         byPlan,
         byStatus,
       },
