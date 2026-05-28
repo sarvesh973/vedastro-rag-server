@@ -468,6 +468,247 @@ function findRelevantChunks(queryEmbedding, chunks, topK = 8) {
   return scored.slice(0, topK);
 }
 
+// ─────────── RAG SIGNAL ENHANCEMENT ───────────
+//
+// Goal: make the retrieval pull more topically-relevant chunks from the
+// 549 indexed chunks (BPHS + Phaladeepika), without changing the corpus.
+//
+// Three signal upgrades layered on top of plain cosine similarity:
+//
+// 1. detectQuestionTopics(question) — classify the user's free-text
+//    question into one or more astrology domains by keyword (career,
+//    marriage, finance, health, children, spirituality, foreign, etc.)
+//    Each domain maps to a vocab pack: classical Sanskrit terms +
+//    relevant house numbers + planet names known from the shastras.
+//
+// 2. buildEnrichedQuery(question, chartData, topics) — concatenates
+//    the user's literal text + chart facts + topic vocab. This is what
+//    becomes the embedding query. Wider vocab => more BPHS / Phaladeepika
+//    chunks score high on cosine, because the indexed text uses the same
+//    Sanskrit/house terminology.
+//
+// 3. fetchAndDiversify(...) — pull TOP_K * 3 candidates first, then
+//    apply MMR (Maximal Marginal Relevance) — pick chunks that are both
+//    relevant AND distinct from each other. Prevents 8 results all
+//    being from the same chapter when the question spans topics.
+
+const TOPIC_VOCAB = {
+  career: 'career profession job work karma karya 10th house dasamsa Saturn Mercury Sun Mars Karmesh dignity dasha bhukti professional success vocational rajyog',
+  marriage: 'marriage wedding wife husband Kalatra 7th house saptamesh navamsha D9 Venus Jupiter Mars Mangal dosha vivah kalathra bhava commitment matrimony spouse legal union',
+  romance: 'romance love attraction affection 5th house Purva Punya panchamesh Venus Moon Mars rati sringara emotional bond crush infatuation feelings heart desire',
+  relationship: 'relationship girlfriend boyfriend dating partner companion 5th house 7th house Venus Mars Moon attraction connection bond intimate love affair courting',
+  finance: 'wealth money finance dhana 2nd house 11th house labha Jupiter Mercury Venus dhanesh Lakshmi Kubera artha lakshmi yoga prosperity affluence',
+  health: 'health body sickness disease 6th house ari Mars Sun Saturn Rahu Ketu roga arishta longevity arogya immunity ailment',
+  children: 'children child progeny putra 5th house panchamesh Jupiter Sun Moon putra bhava santati offspring fertility',
+  spirituality: 'spirituality moksha dharma 9th house 12th house Jupiter Ketu vimshamsha D20 sadhana meditation devotion gyana pilgrimage tapasya guru bhakti',
+  foreign: 'foreign travel abroad relocation 12th house 9th house Rahu Mercury Saturn videsh yatra migration overseas pravas',
+  education: 'education learning study vidya 4th house 5th house Mercury Jupiter Saraswati gyana research scholar academics',
+  family: 'family mother father siblings 4th house 3rd house parents matri pitri Moon Sun Mars sukhabhava parivar relatives',
+  litigation: 'litigation enemies dispute legal 6th house 8th house Mars Saturn Rahu shatru opponents court case lawsuit conflict',
+  longevity: 'longevity lifespan age 1st house 8th house Saturn Mars ayur balarishta arishta yoga life span vitality',
+  remedies: 'remedies upay mantra gemstone fasting daan donation puja worship parihara propitiation karmaphala spiritual practice',
+  timing: 'timing when dasha bhukti antardasha transit gochara sade sati specific period years kaal time prediction event',
+  personality: 'personality character nature swabhava 1st house lagna ascendant Sun Moon temperament aura disposition',
+  general: 'rajayoga dhanayoga vipreet jeevan life general overall future destiny prarabdha karma fate fortune bhagya'
+};
+
+function detectQuestionTopics(question) {
+  if (!question || typeof question !== 'string') return ['general'];
+  const q = question.toLowerCase();
+  const matches = [];
+
+  const triggers = {
+    career: /\b(career|job|work|profession|business|naukri|kaam|kaarya|karma|promotion|salary)\b/,
+    marriage: /\b(marriage|marry|married|shaadi|vivah|wedding|matrimony|spouse|wife|husband|divorce|engaged|engagement|kab.*shaadi|when.*married|when.*marriage)\b/,
+    romance: /\b(love|romance|romantic|crush|attraction|feelings|heart|pyaar|prem|ishq|mohabbat|infatuation|first love)\b/,
+    relationship: /\b(girlfriend|boyfriend|gf|bf|dating|relationship|partner|companion|breakup|patch up|love affair|courting|committed)\b/,
+    finance: /\b(money|wealth|rich|finance|financial|paisa|dhan|income|earnings|wealthy|debt|loan|investment|property)\b/,
+    health: /\b(health|sick|illness|disease|bimari|swasth|fitness|medical|surgery|pain|recovery|treatment)\b/,
+    children: /\b(child|children|baby|pregnant|pregnancy|bachcha|santan|santati|putra|son|daughter|conceive|fertility)\b/,
+    spirituality: /\b(spiritual|moksha|dharma|god|bhagwan|meditation|sadhana|guru|enlightenment|devotion|bhakti|temple|pilgrimage)\b/,
+    foreign: /\b(foreign|abroad|visa|videsh|country|migrate|migration|relocate|nri|overseas|usa|uk|canada|australia)\b/,
+    education: /\b(study|education|exam|college|university|degree|padhai|vidya|learning|course|research|phd|scholar)\b/,
+    family: /\b(family|mother|father|parent|maa|papa|mom|dad|brother|sister|bhai|behen|parivar|relative)\b/,
+    litigation: /\b(court|case|legal|lawsuit|enemy|shatru|dispute|fight|conflict|police|crime|punishment)\b/,
+    longevity: /\b(age|lifespan|long life|death|ayu|jeevan|live long|will i live)\b/,
+    remedies: /\b(remedy|remedies|upay|upaay|mantra|gemstone|stone|ratna|fast|vrat|puja|donation|daan|parihara|solution|cure|fix)\b/,
+    timing: /\b(when|kab|year|month|date|time|how long|after how|aaj|kal|abhi|future|jaldi|soon)\b/,
+    personality: /\b(personality|nature|character|swabhav|kaisa hu|kaisa hoon|kaisi hu|who am i|tell me about myself)\b/,
+  };
+
+  for (const [topic, re] of Object.entries(triggers)) {
+    if (re.test(q)) matches.push(topic);
+  }
+  return matches.length > 0 ? matches : ['general'];
+}
+
+function buildEnrichedQuery(question, chartData, topics) {
+  const parts = [question];
+
+  if (chartData) {
+    const planets = Object.entries(chartData.planets)
+      .map(([name, d]) => `${name} in ${d.sign} house ${d.house}`)
+      .join(', ');
+    parts.push(`${chartData.ascendant.sign} lagna`);
+    parts.push(`${chartData.dasha.mahadasha} mahadasha ${chartData.dasha.antardasha || ''} antardasha`);
+    parts.push(planets);
+  }
+
+  for (const topic of topics) {
+    if (TOPIC_VOCAB[topic]) parts.push(TOPIC_VOCAB[topic]);
+  }
+
+  return parts.join(' ').slice(0, 1500); // embedding model handles up to ~2048 tokens, leave headroom
+}
+
+// When the LLM classifier fails (timeout, parse error, quota), we
+// still want the regex-fallback path to give varied answers — not the
+// default "anchor on current dasha" generic reply. This map gives each
+// regex topic a one-line focus directive matching what the LLM would
+// have produced. Same purpose, lower quality, but better than nothing.
+const FOCUS_BY_TOPIC = {
+  career: '10th house lord, its placement and aspects, plus Dasamsa (D10) chart. Reference current dasha only if dasha lord directly involves career houses.',
+  marriage: '7th house lord, its placement and aspects, plus Navamsha (D9) chart. Venus dignity for both genders. Mars for Mangal dosha checks. Age must be considered.',
+  romance: '5th house (Purva Punya / romance), its lord, and Venus placement. Moon for emotional disposition. Avoid jumping to marriage timing.',
+  relationship: '5th house for romance + 7th house for commitment, Venus for attraction, Mars/Moon for emotional dynamics. Distinguish casual dating from serious commitment.',
+  finance: '2nd house (accumulated wealth), 11th house (gains), and their lords. Jupiter for wealth karaka. Distinguish steady income from sudden gains (5th).',
+  health: '6th house (illness), 1st house lord (vitality), ascendant strength. Mars for inflammation, Saturn for chronic, Moon for mental. Never predict severe outcomes.',
+  children: '5th house (santan) and its lord, Jupiter as putra karaka, 9th house. Consider current age and marital status.',
+  spirituality: '9th house (dharma), 12th house (moksha), Jupiter, Ketu. Vimshamsha (D20) if available.',
+  foreign: '12th house (foreign lands), 9th house (long journeys), Rahu placement. Distinguish travel from settlement.',
+  education: '4th house (basic education), 5th house (intelligence/higher learning), Mercury, Jupiter. 9th for PhD/research.',
+  family: 'Specific bhava per relation: 4th=mother, 9th=father, 3rd=siblings. Reference karakas Moon (mother), Sun (father), Mars (brothers), Mercury (cousins).',
+  litigation: '6th house (enemies), 8th house (sudden losses), Mars and Saturn placements.',
+  longevity: '8th house, ascendant lord, balarishta / madhya / poorna ayur classification. Do not give specific death predictions ever.',
+  remedies: 'Identify the afflicted planet from the chart and give MIX of spiritual (mantra/gem/fast) and concrete behavioral remedies.',
+  timing: 'Current Mahadasha+Antardasha lord, sub-period dignity, transit Saturn/Jupiter aspects to relevant house.',
+  personality: 'Ascendant sign + ascendant lord placement, Moon sign, Sun sign. Use the trio for full picture.',
+  general: 'Pick the strongest unambiguous yoga or planetary configuration in the chart. Be specific, not generic.',
+};
+
+function synthesizeFocusFromTopic(topic) {
+  return FOCUS_BY_TOPIC[topic] || FOCUS_BY_TOPIC.general;
+}
+
+// LLM-based question classifier. Uses gemini-2.5-flash-lite (cheap +
+// fast: ~300ms, ~$0.0001 per call). Returns a structured analysis
+// of the question that drives both retrieval AND answer focus:
+//
+//   {
+//     topic: "marriage_timing" | "career_change" | "property_purchase" | ...
+//     vocab: "specific Sanskrit/house/planet keywords to embed",
+//     focus: "which chart factors to anchor the answer on",
+//     novelty: "what makes THIS question different from a generic one"
+//   }
+//
+// Why this beats regex: handles paraphrases, code-switching (Hinglish),
+// and combined questions ("career and marriage in 2026") without me
+// having to enumerate every possible phrasing. The focus field is the
+// critical bit — it tells the main answer prompt to anchor on (say)
+// the 10th lord and Dasamsa for a career question, instead of just
+// defaulting to current dasha which makes every answer feel the same.
+async function classifyQuestionWithLLM(question, chartData) {
+  if (!question || !GEMINI_API_KEY) return null;
+
+  const chartSummary = chartData ? (
+    `Ascendant: ${chartData.ascendant.sign}. ` +
+    `Current dasha: ${chartData.dasha.mahadasha}-${chartData.dasha.antardasha}. ` +
+    `Key placements: ${Object.entries(chartData.planets)
+      .map(([n, d]) => `${n} in ${d.sign} house ${d.house}`)
+      .slice(0, 5).join(', ')}.`
+  ) : 'No chart available.';
+
+  const prompt = `You are an expert Vedic astrologer routing a user's question to the right shastra chapters. Reply ONLY with a JSON object, no markdown.
+
+User question: "${question}"
+
+User's chart context: ${chartSummary}
+
+Return this exact JSON shape:
+{
+  "topic": "<one specific astrology sub-topic, e.g. marriage_timing, marriage_partner_nature, career_business_vs_job, career_promotion, career_change, finance_property, finance_debt, finance_wealth, finance_speculation, health_chronic, health_surgery, mental_health, family_mother, family_father, family_siblings, family_inlaws, children_conception, children_welfare, education_higher, education_exam_result, spirituality_path, spirituality_guru, foreign_settle, foreign_short_travel, longevity, remedies_general, remedies_marriage, romance, breakup_recovery, general>",
+  "vocab": "<15-25 Sanskrit/English keywords classical Vedic texts use for THIS specific topic: relevant house numbers, planets, karakas, yogas, divisional charts. Be specific. Example for 'career_business': 'business entrepreneur 3rd house 7th house 10th house Mercury Mars Jupiter parakrama vyaya rajayoga svatantra independent venture'>",
+  "focus": "<a one-sentence instruction telling the answering astrologer which chart factor(s) to anchor the prediction on, e.g. '7th lord and its placement in D9, plus Venus dignity' or '10th house lord, Dasamsa, current dasha lord effect on career sectors'>",
+  "tone": "<one word: serious|hopeful|cautious|neutral|empathetic — based on the emotional weight of the question>"
+}`;
+
+  try {
+    const genAI = getGenAI();
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash-lite',
+      generationConfig: {
+        responseMimeType: 'application/json', // force JSON, no markdown fences
+        temperature: 0.2,
+      },
+    });
+    // Hard 3s timeout — if the classifier is slow we'd rather fall back
+    // to regex than slow down chat. Race against a timeout promise.
+    const result = await Promise.race([
+      model.generateContent(prompt),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('classifier-timeout')), 2000)),
+    ]);
+    const text = result.response.text();
+    // Extract first {...} balanced object in case model returns extra text.
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) {
+      console.warn('[chat] LLM classifier returned non-JSON:', text.slice(0, 120));
+      return null;
+    }
+    const slice = text.slice(start, end + 1);
+    let parsed;
+    try {
+      parsed = JSON.parse(slice);
+    } catch {
+      // Apply the same bracket-balancer we use for the main chat JSON.
+      parsed = JSON.parse(balanceJsonBrackets(slice));
+    }
+    if (parsed && typeof parsed.topic === 'string') {
+      return {
+        topic: parsed.topic,
+        vocab: String(parsed.vocab || ''),
+        focus: String(parsed.focus || ''),
+        tone: String(parsed.tone || 'neutral'),
+      };
+    }
+  } catch (e) {
+    console.warn('[chat] LLM classifier failed:', String(e.message || e).slice(0, 160));
+  }
+  return null;
+}
+
+// Maximal Marginal Relevance: select topK chunks that are both highly
+// relevant to the query AND diverse from each other. Prevents 8 nearly
+// identical chunks from the same BPHS chapter dominating the context.
+// lambda 0..1: 1 = pure relevance, 0 = pure diversity. 0.7 is a good
+// middle ground that keeps quality high but enforces some spread.
+function selectDiverseChunks(candidates, topK = 8, lambda = 0.7) {
+  if (candidates.length <= topK) return candidates;
+  const selected = [];
+  const remaining = candidates.slice();
+
+  // Always take the top-scoring one first.
+  selected.push(remaining.shift());
+
+  while (selected.length < topK && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const c = remaining[i];
+      // Max similarity to anything already picked.
+      let maxSimToSelected = 0;
+      for (const s of selected) {
+        const sim = cosineSimilarity(c.embedding, s.embedding);
+        if (sim > maxSimToSelected) maxSimToSelected = sim;
+      }
+      const mmr = lambda * c.score - (1 - lambda) * maxSimToSelected;
+      if (mmr > bestScore) { bestScore = mmr; bestIdx = i; }
+    }
+    selected.push(remaining.splice(bestIdx, 1)[0]);
+  }
+  return selected;
+}
+
 // --- GEMINI HELPERS ---
 function getGenAI() {
   if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
@@ -484,12 +725,19 @@ async function getQueryEmbedding(text) {
   return result.embedding.values;
 }
 
-async function generateResponse(prompt) {
+async function generateResponse(prompt, opts) {
   const genAI = getGenAI();
   // Pinned to explicit 2.5 versions. Do NOT use 'gemini-flash-latest' —
   // that alias silently routes to gemini-3-flash which has only 20 requests/day
   // on the free tier and will burn the key instantly.
-  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  //
+  // opts.preferLite=true → try gemini-2.5-flash-lite first (~2-3x faster
+  // than flash, used for chat to stay safely under the app's 15s timeout
+  // ceiling). Falls back to flash if lite errors. Horoscope keeps the
+  // default flash-first order since it's cached anyway.
+  const models = (opts && opts.preferLite)
+    ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
+    : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
   for (const modelName of models) {
     try {
@@ -950,13 +1198,45 @@ function languageDirective(language) {
     'Never use Devanagari script.';
 }
 
-function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language) {
+function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language, classifier) {
+  const focus = classifier && classifier.focus ? classifier.focus : '';
+  const tone = classifier && classifier.tone ? classifier.tone : 'neutral';
+  const topic = classifier && classifier.topic ? classifier.topic : 'general';
+  const focusBlock = focus
+    ? `QUESTION-SPECIFIC FOCUS (REQUIRED — anchor your reasoning here, do NOT default to current dasha for every answer):
+${focus}
+Tone for THIS reply: ${tone}.
+Sub-topic: ${topic}.
+`
+    : '';
   const versesContext = relevantChunks
     .map((c, i) => `[Source ${i + 1}: ${c.book} Ch.${c.chapter} "${c.chapter_name}", Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
 
+  // Compute current age from the userProfile string so the model never
+  // has to do date math itself. Without this, Gemini sometimes predicts
+  // marriage at 24 to a 22-year-old simply because the active dasha is
+  // a marriage-friendly one — context-blind.
+  const ageNote = (() => {
+    if (!userProfile) return '';
+    const m = userProfile.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/)
+          || userProfile.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (!m) return '';
+    let y, mo, d;
+    if (m[3].length === 4) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+    else                    { y = +m[1]; mo = +m[2]; d = +m[3]; }
+    const dob = new Date(y, mo - 1, d);
+    if (isNaN(dob.getTime())) return '';
+    const now = new Date();
+    let age = now.getFullYear() - y;
+    const beforeBirthday = now.getMonth() < mo - 1
+      || (now.getMonth() === mo - 1 && now.getDate() < d);
+    if (beforeBirthday) age--;
+    return `CURRENT AGE: ${age} years old. Factor this in for life-event timing (do not predict marriage/children before age 22 unless user explicitly mentions an existing relationship; do not predict retirement before 55, etc.).`;
+  })();
+
   const profileContext = userProfile
-    ? `USER'S BIRTH DETAILS:\n${userProfile}`
+    ? `USER'S BIRTH DETAILS:\n${userProfile}\n${ageNote}`
     : 'No birth details available.';
 
   const chartContext = chartData ? formatChartForPrompt(chartData) : '';
@@ -1012,6 +1292,9 @@ RULES FOR THE JSON:
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
+- VARY your chart references per question type — do NOT anchor every answer on the current Mahadasha/Antardasha. Career questions should foreground the 10th lord and Dasamsa. Marriage should foreground the 7th lord and Navamsha. Health should foreground the 6th lord and ascendant. Property the 4th lord. Education the 4th + 5th lords. Children the 5th lord and Jupiter. Only mention current dasha when it is genuinely the strongest signal for that specific question.
+- If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
+- If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
 - Keep the total content (all summary + all explanations) under ~320 words.
 - Never predict death, severe illness, or create fear.
 - Do NOT add a remedy unless the user explicitly asks for remedies / upay /
@@ -1033,6 +1316,7 @@ CONVERSATION RULES:
 ${profileContext}
 ${chartContext}
 
+${focusBlock}
 ${historyContext}
 
 REFERENCE VERSES (use these for accuracy — DO NOT cite them by name in your reply):
@@ -1676,19 +1960,51 @@ app.post('/chat', async (req, res) => {
 
     const chunks = loadKnowledgeBase();
 
-    // Smart query: include chart context for better RAG search
-    let searchQuery = question;
-    if (chartData) {
-      // Enhance search with relevant planetary info
-      const planets = Object.entries(chartData.planets)
-        .map(([name, data]) => `${name} in ${data.sign} house ${data.house}`)
-        .join(', ');
-      searchQuery = `${question} ${chartData.ascendant.sign} lagna ${chartData.dasha.mahadasha} dasha ${planets}`;
+    // KEY: run the LLM classifier IN PARALLEL with the embedding call,
+    // not before it. This way classifier latency is hidden behind the
+    // embedding call instead of stacking on top — total chat time
+    // doesn't grow even if classifier takes 2-3s.
+    //
+    // Retrieval uses regex topics (instant), so embedding kicks off
+    // immediately. When the classifier resolves, we use its `focus` for
+    // the answer prompt. If classifier is slower than embedding, we just
+    // wait the small delta. If it fails, we synthesize focus from the
+    // regex topic — answer still gets variety guidance.
+    const regexTopics = detectQuestionTopics(question);
+    const baseQuery = buildEnrichedQuery(question, chartData, regexTopics);
+
+    const t0 = Date.now();
+    const [queryEmbedding, llmClass] = await Promise.all([
+      getQueryEmbedding(baseQuery),
+      classifyQuestionWithLLM(question, chartData),
+    ]);
+    const parallelMs = Date.now() - t0;
+
+    let topics, focusInstruction, toneHint;
+    if (llmClass) {
+      topics = [llmClass.topic];
+      focusInstruction = llmClass.focus || synthesizeFocusFromTopic(regexTopics[0]);
+      toneHint = llmClass.tone || 'neutral';
+      console.log(`[chat] parallel ${parallelMs}ms LLM-topic=${llmClass.topic} tone=${toneHint}`);
+    } else {
+      topics = regexTopics;
+      focusInstruction = synthesizeFocusFromTopic(regexTopics[0]);
+      toneHint = 'neutral';
+      console.log(`[chat] parallel ${parallelMs}ms regex-only topics=[${regexTopics.join(',')}]`);
     }
 
-    const queryEmbedding = await getQueryEmbedding(searchQuery.substring(0, 500));
-    const relevant = findRelevantChunks(queryEmbedding, chunks, 8);
-    const prompt = buildChatPrompt(question, relevant, userProfile, chatHistory, chartData, (req.body && req.body.language) || 'hinglish');
+    // Fetch wider net (24 candidates), then MMR-diversify down to 8.
+    const candidates = findRelevantChunks(queryEmbedding, chunks, 24);
+    const relevant = selectDiverseChunks(candidates, 8, 0.7);
+    console.log(`[chat] picked ${relevant.length} chunks, top score=${(candidates[0]?.score || 0).toFixed(3)}, books=${[...new Set(relevant.map(c => c.book))].join('+')}`);
+    const prompt = buildChatPrompt(
+      question, relevant, userProfile, chatHistory, chartData,
+      (req.body && req.body.language) || 'hinglish',
+      { focus: focusInstruction, tone: toneHint, topic: topics[0] || 'general' },
+    );
+    // Chat uses default model order (flash first, lite fallback) for
+    // best answer quality. Flash-lite latency experiment was reverted
+    // pending the next AAB which will bump the client timeout from 15s.
     const raw = await generateResponse(prompt);
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
