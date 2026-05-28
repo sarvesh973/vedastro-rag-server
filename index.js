@@ -2247,6 +2247,115 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
   }
 });
 
+// GET /admin/api/signups?limit=500 — full list of every signed-up user
+// from Firebase Auth, newest first. Includes email, provider, creation
+// time. Page-walks listUsers; fine at current scale (<5k users).
+app.get('/admin/api/signups', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
+  const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
+  try {
+    const all = [];
+    let nextPageToken = undefined;
+    do {
+      const page = await firebaseAdmin.auth().listUsers(1000, nextPageToken);
+      for (const u of page.users) {
+        const providers = (u.providerData || []).map(p => p.providerId);
+        all.push({
+          uid: u.uid,
+          email: u.email || null,
+          displayName: u.displayName || null,
+          phoneNumber: u.phoneNumber || null,
+          provider: providers.includes('google.com') ? 'google'
+            : providers.includes('phone') || u.phoneNumber ? 'phone'
+            : providers.includes('password') ? 'email'
+            : (providers[0] || 'anonymous'),
+          createdAt: u.metadata && u.metadata.creationTime ? new Date(u.metadata.creationTime).toISOString() : null,
+          lastSignInAt: u.metadata && u.metadata.lastSignInTime ? new Date(u.metadata.lastSignInTime).toISOString() : null,
+          disabled: !!u.disabled,
+        });
+      }
+      nextPageToken = page.pageToken;
+    } while (nextPageToken && all.length < limit);
+
+    all.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    res.json({ total: all.length, items: all.slice(0, limit) });
+  } catch (e) {
+    console.error('[admin/signups]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /admin/api/subscriptions?limit=500 — every subscription doc the
+// Razorpay webhook has written, regardless of current status. Reads
+// users/{uid}/subscription/current via collectionGroup. Includes
+// cancelled / expired / paused so the full lifecycle is visible.
+app.get('/admin/api/subscriptions', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
+  const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
+  try {
+    const snap = await firestoreDb.collectionGroup('subscription').get();
+    const rows = [];
+    const toIso = (v) => v && typeof v.toDate === 'function'
+      ? v.toDate().toISOString() : (typeof v === 'string' ? v : null);
+
+    for (const doc of snap.docs) {
+      if (doc.id !== 'current') continue;
+      const uid = doc.ref.parent.parent ? doc.ref.parent.parent.id : null;
+      if (!uid) continue;
+      const d = doc.data() || {};
+      rows.push({
+        uid,
+        plan: d.plan || d.planId || null,
+        status: d.status || 'unknown',
+        razorpaySubscriptionId: d.razorpaySubscriptionId || null,
+        trialEndsAt: toIso(d.trialEndsAt),
+        currentPeriodEndsAt: toIso(d.currentPeriodEndsAt),
+        cancelledAt: toIso(d.cancelledAt),
+        updatedAt: toIso(d.updatedAt),
+        createdAt: toIso(d.createdAt),
+      });
+    }
+
+    // Resolve emails for these uids — single getUsers call per 100.
+    const uids = [...new Set(rows.map(r => r.uid))];
+    const emailMap = {};
+    for (let i = 0; i < uids.length; i += 100) {
+      const chunk = uids.slice(i, i + 100).map(uid => ({ uid }));
+      try {
+        const result = await firebaseAdmin.auth().getUsers(chunk);
+        for (const u of result.users) {
+          emailMap[u.uid] = u.email || u.phoneNumber || null;
+        }
+      } catch (_) {}
+    }
+    for (const r of rows) r.email = emailMap[r.uid] || null;
+
+    // Order: active first, then by most recent activity desc.
+    rows.sort((a, b) => {
+      const sa = a.status === 'active' ? 0 : 1;
+      const sb = b.status === 'active' ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      const ta = a.cancelledAt || a.updatedAt || a.currentPeriodEndsAt || '';
+      const tb = b.cancelledAt || b.updatedAt || b.currentPeriodEndsAt || '';
+      return tb.localeCompare(ta);
+    });
+
+    const summary = { total: rows.length, active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, trialing: 0, other: 0 };
+    for (const r of rows) {
+      if (summary[r.status] !== undefined) summary[r.status]++;
+      else summary.other++;
+    }
+
+    res.json({ summary, items: rows.slice(0, limit) });
+  } catch (e) {
+    console.error('[admin/subscriptions]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /admin/api/chats/legacy-memory — surface the in-memory
 // conversationStore (the old /admin/legacy data). This is RAM-only on
 // Render — it resets on every deploy and is capped at MAX_CONVERSATION_USERS.
