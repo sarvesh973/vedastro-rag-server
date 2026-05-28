@@ -2002,9 +2002,10 @@ app.post('/chat', async (req, res) => {
       (req.body && req.body.language) || 'hinglish',
       { focus: focusInstruction, tone: toneHint, topic: topics[0] || 'general' },
     );
-    // preferLite=true: chat needs to stay under the app's 15s ceiling.
-    // gemini-2.5-flash-lite returns ~2-3x faster with the same JSON shape.
-    const raw = await generateResponse(prompt, { preferLite: true });
+    // Chat uses default model order (flash first, lite fallback) for
+    // best answer quality. Flash-lite latency experiment was reverted
+    // pending the next AAB which will bump the client timeout from 15s.
+    const raw = await generateResponse(prompt);
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
