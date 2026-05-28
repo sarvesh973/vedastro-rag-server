@@ -645,7 +645,7 @@ Return this exact JSON shape:
     // to regex than slow down chat. Race against a timeout promise.
     const result = await Promise.race([
       model.generateContent(prompt),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('classifier-timeout')), 3000)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('classifier-timeout')), 2000)),
     ]);
     const text = result.response.text();
     // Extract first {...} balanced object in case model returns extra text.
@@ -1953,42 +1953,38 @@ app.post('/chat', async (req, res) => {
 
     const chunks = loadKnowledgeBase();
 
-    // LLM-based classifier (gemini-flash-lite, ~$0.0001 + ~300ms).
-    // Runs IN PARALLEL with nothing else for now — gated by a 3s hard
-    // timeout inside classifyQuestionWithLLM so it can't slow down chat.
-    const classifyStart = Date.now();
-    let llmClass = await classifyQuestionWithLLM(question, chartData);
-    const classifyMs = Date.now() - classifyStart;
-    let topics, enrichedQuery, focusInstruction = '', toneHint = 'neutral';
+    // KEY: run the LLM classifier IN PARALLEL with the embedding call,
+    // not before it. This way classifier latency is hidden behind the
+    // embedding call instead of stacking on top — total chat time
+    // doesn't grow even if classifier takes 2-3s.
+    //
+    // Retrieval uses regex topics (instant), so embedding kicks off
+    // immediately. When the classifier resolves, we use its `focus` for
+    // the answer prompt. If classifier is slower than embedding, we just
+    // wait the small delta. If it fails, we synthesize focus from the
+    // regex topic — answer still gets variety guidance.
+    const regexTopics = detectQuestionTopics(question);
+    const baseQuery = buildEnrichedQuery(question, chartData, regexTopics);
 
+    const t0 = Date.now();
+    const [queryEmbedding, llmClass] = await Promise.all([
+      getQueryEmbedding(baseQuery),
+      classifyQuestionWithLLM(question, chartData),
+    ]);
+    const parallelMs = Date.now() - t0;
+
+    let topics, focusInstruction, toneHint;
     if (llmClass) {
       topics = [llmClass.topic];
-      // Build the enriched query from the LLM's tailored vocab instead of
-      // a hardcoded pack — much more precise.
-      const parts = [question];
-      if (chartData) {
-        parts.push(`${chartData.ascendant.sign} lagna`);
-        parts.push(`${chartData.dasha.mahadasha} mahadasha ${chartData.dasha.antardasha || ''} antardasha`);
-        parts.push(Object.entries(chartData.planets)
-          .map(([n, d]) => `${n} in ${d.sign} house ${d.house}`).join(', '));
-      }
-      if (llmClass.vocab) parts.push(llmClass.vocab);
-      enrichedQuery = parts.join(' ').slice(0, 1500);
-      focusInstruction = llmClass.focus || '';
+      focusInstruction = llmClass.focus || synthesizeFocusFromTopic(regexTopics[0]);
       toneHint = llmClass.tone || 'neutral';
-      console.log(`[chat] LLM-class ${classifyMs}ms topic=${llmClass.topic} tone=${toneHint} focus="${focusInstruction.slice(0, 80)}"`);
+      console.log(`[chat] parallel ${parallelMs}ms LLM-topic=${llmClass.topic} tone=${toneHint}`);
     } else {
-      // Regex fallback. We synthesize a 'focus' instruction from the
-      // detected topic so the answer prompt STILL gets variety guidance
-      // even when the LLM classifier fails. This is what prevents the
-      // "same generic answer" you observed during fallback.
-      topics = detectQuestionTopics(question);
-      enrichedQuery = buildEnrichedQuery(question, chartData, topics);
-      focusInstruction = synthesizeFocusFromTopic(topics[0]);
-      console.log(`[chat] regex-fallback ${classifyMs}ms topics=[${topics.join(',')}] synth-focus="${focusInstruction.slice(0, 80)}"`);
+      topics = regexTopics;
+      focusInstruction = synthesizeFocusFromTopic(regexTopics[0]);
+      toneHint = 'neutral';
+      console.log(`[chat] parallel ${parallelMs}ms regex-only topics=[${regexTopics.join(',')}]`);
     }
-
-    const queryEmbedding = await getQueryEmbedding(enrichedQuery);
 
     // Fetch wider net (24 candidates), then MMR-diversify down to 8.
     const candidates = findRelevantChunks(queryEmbedding, chunks, 24);
