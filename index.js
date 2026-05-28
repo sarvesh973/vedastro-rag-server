@@ -494,7 +494,9 @@ function findRelevantChunks(queryEmbedding, chunks, topK = 8) {
 
 const TOPIC_VOCAB = {
   career: 'career profession job work karma karya 10th house dasamsa Saturn Mercury Sun Mars Karmesh dignity dasha bhukti professional success vocational rajyog',
-  marriage: 'marriage spouse partner relationship Kalatra wife husband 7th house saptamesh navamsha D9 Venus Jupiter Mars Mangal dosha vivah sukha kalathra bhava',
+  marriage: 'marriage wedding wife husband Kalatra 7th house saptamesh navamsha D9 Venus Jupiter Mars Mangal dosha vivah kalathra bhava commitment matrimony spouse legal union',
+  romance: 'romance love attraction affection 5th house Purva Punya panchamesh Venus Moon Mars rati sringara emotional bond crush infatuation feelings heart desire',
+  relationship: 'relationship girlfriend boyfriend dating partner companion 5th house 7th house Venus Mars Moon attraction connection bond intimate love affair courting',
   finance: 'wealth money finance dhana 2nd house 11th house labha Jupiter Mercury Venus dhanesh Lakshmi Kubera artha lakshmi yoga prosperity affluence',
   health: 'health body sickness disease 6th house ari Mars Sun Saturn Rahu Ketu roga arishta longevity arogya immunity ailment',
   children: 'children child progeny putra 5th house panchamesh Jupiter Sun Moon putra bhava santati offspring fertility',
@@ -517,7 +519,9 @@ function detectQuestionTopics(question) {
 
   const triggers = {
     career: /\b(career|job|work|profession|business|naukri|kaam|kaarya|karma|promotion|salary)\b/,
-    marriage: /\b(marriage|marry|wife|husband|partner|spouse|relationship|love|shaadi|vivah|girlfriend|boyfriend|divorce|breakup)\b/,
+    marriage: /\b(marriage|marry|married|shaadi|vivah|wedding|matrimony|spouse|wife|husband|divorce|engaged|engagement|kab.*shaadi|when.*married|when.*marriage)\b/,
+    romance: /\b(love|romance|romantic|crush|attraction|feelings|heart|pyaar|prem|ishq|mohabbat|infatuation|first love)\b/,
+    relationship: /\b(girlfriend|boyfriend|gf|bf|dating|relationship|partner|companion|breakup|patch up|love affair|courting|committed)\b/,
     finance: /\b(money|wealth|rich|finance|financial|paisa|dhan|income|earnings|wealthy|debt|loan|investment|property)\b/,
     health: /\b(health|sick|illness|disease|bimari|swasth|fitness|medical|surgery|pain|recovery|treatment)\b/,
     children: /\b(child|children|baby|pregnant|pregnancy|bachcha|santan|santati|putra|son|daughter|conceive|fertility)\b/,
@@ -1076,8 +1080,30 @@ function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, cha
     .map((c, i) => `[Source ${i + 1}: ${c.book} Ch.${c.chapter} "${c.chapter_name}", Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
 
+  // Compute current age from the userProfile string so the model never
+  // has to do date math itself. Without this, Gemini sometimes predicts
+  // marriage at 24 to a 22-year-old simply because the active dasha is
+  // a marriage-friendly one — context-blind.
+  const ageNote = (() => {
+    if (!userProfile) return '';
+    const m = userProfile.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/)
+          || userProfile.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (!m) return '';
+    let y, mo, d;
+    if (m[3].length === 4) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+    else                    { y = +m[1]; mo = +m[2]; d = +m[3]; }
+    const dob = new Date(y, mo - 1, d);
+    if (isNaN(dob.getTime())) return '';
+    const now = new Date();
+    let age = now.getFullYear() - y;
+    const beforeBirthday = now.getMonth() < mo - 1
+      || (now.getMonth() === mo - 1 && now.getDate() < d);
+    if (beforeBirthday) age--;
+    return `CURRENT AGE: ${age} years old. Factor this in for life-event timing (do not predict marriage/children before age 22 unless user explicitly mentions an existing relationship; do not predict retirement before 55, etc.).`;
+  })();
+
   const profileContext = userProfile
-    ? `USER'S BIRTH DETAILS:\n${userProfile}`
+    ? `USER'S BIRTH DETAILS:\n${userProfile}\n${ageNote}`
     : 'No birth details available.';
 
   const chartContext = chartData ? formatChartForPrompt(chartData) : '';
