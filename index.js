@@ -725,12 +725,19 @@ async function getQueryEmbedding(text) {
   return result.embedding.values;
 }
 
-async function generateResponse(prompt) {
+async function generateResponse(prompt, opts) {
   const genAI = getGenAI();
   // Pinned to explicit 2.5 versions. Do NOT use 'gemini-flash-latest' —
   // that alias silently routes to gemini-3-flash which has only 20 requests/day
   // on the free tier and will burn the key instantly.
-  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  //
+  // opts.preferLite=true → try gemini-2.5-flash-lite first (~2-3x faster
+  // than flash, used for chat to stay safely under the app's 15s timeout
+  // ceiling). Falls back to flash if lite errors. Horoscope keeps the
+  // default flash-first order since it's cached anyway.
+  const models = (opts && opts.preferLite)
+    ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
+    : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
   for (const modelName of models) {
     try {
@@ -1995,7 +2002,9 @@ app.post('/chat', async (req, res) => {
       (req.body && req.body.language) || 'hinglish',
       { focus: focusInstruction, tone: toneHint, topic: topics[0] || 'general' },
     );
-    const raw = await generateResponse(prompt);
+    // preferLite=true: chat needs to stay under the app's 15s ceiling.
+    // gemini-2.5-flash-lite returns ~2-3x faster with the same JSON shape.
+    const raw = await generateResponse(prompt, { preferLite: true });
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
