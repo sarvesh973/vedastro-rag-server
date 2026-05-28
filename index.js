@@ -561,6 +561,35 @@ function buildEnrichedQuery(question, chartData, topics) {
   return parts.join(' ').slice(0, 1500); // embedding model handles up to ~2048 tokens, leave headroom
 }
 
+// When the LLM classifier fails (timeout, parse error, quota), we
+// still want the regex-fallback path to give varied answers — not the
+// default "anchor on current dasha" generic reply. This map gives each
+// regex topic a one-line focus directive matching what the LLM would
+// have produced. Same purpose, lower quality, but better than nothing.
+const FOCUS_BY_TOPIC = {
+  career: '10th house lord, its placement and aspects, plus Dasamsa (D10) chart. Reference current dasha only if dasha lord directly involves career houses.',
+  marriage: '7th house lord, its placement and aspects, plus Navamsha (D9) chart. Venus dignity for both genders. Mars for Mangal dosha checks. Age must be considered.',
+  romance: '5th house (Purva Punya / romance), its lord, and Venus placement. Moon for emotional disposition. Avoid jumping to marriage timing.',
+  relationship: '5th house for romance + 7th house for commitment, Venus for attraction, Mars/Moon for emotional dynamics. Distinguish casual dating from serious commitment.',
+  finance: '2nd house (accumulated wealth), 11th house (gains), and their lords. Jupiter for wealth karaka. Distinguish steady income from sudden gains (5th).',
+  health: '6th house (illness), 1st house lord (vitality), ascendant strength. Mars for inflammation, Saturn for chronic, Moon for mental. Never predict severe outcomes.',
+  children: '5th house (santan) and its lord, Jupiter as putra karaka, 9th house. Consider current age and marital status.',
+  spirituality: '9th house (dharma), 12th house (moksha), Jupiter, Ketu. Vimshamsha (D20) if available.',
+  foreign: '12th house (foreign lands), 9th house (long journeys), Rahu placement. Distinguish travel from settlement.',
+  education: '4th house (basic education), 5th house (intelligence/higher learning), Mercury, Jupiter. 9th for PhD/research.',
+  family: 'Specific bhava per relation: 4th=mother, 9th=father, 3rd=siblings. Reference karakas Moon (mother), Sun (father), Mars (brothers), Mercury (cousins).',
+  litigation: '6th house (enemies), 8th house (sudden losses), Mars and Saturn placements.',
+  longevity: '8th house, ascendant lord, balarishta / madhya / poorna ayur classification. Do not give specific death predictions ever.',
+  remedies: 'Identify the afflicted planet from the chart and give MIX of spiritual (mantra/gem/fast) and concrete behavioral remedies.',
+  timing: 'Current Mahadasha+Antardasha lord, sub-period dignity, transit Saturn/Jupiter aspects to relevant house.',
+  personality: 'Ascendant sign + ascendant lord placement, Moon sign, Sun sign. Use the trio for full picture.',
+  general: 'Pick the strongest unambiguous yoga or planetary configuration in the chart. Be specific, not generic.',
+};
+
+function synthesizeFocusFromTopic(topic) {
+  return FOCUS_BY_TOPIC[topic] || FOCUS_BY_TOPIC.general;
+}
+
 // LLM-based question classifier. Uses gemini-2.5-flash-lite (cheap +
 // fast: ~300ms, ~$0.0001 per call). Returns a structured analysis
 // of the question that drives both retrieval AND answer focus:
@@ -605,10 +634,35 @@ Return this exact JSON shape:
 
   try {
     const genAI = getGenAI();
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().replace(/```json?/gi, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(text);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash-lite',
+      generationConfig: {
+        responseMimeType: 'application/json', // force JSON, no markdown fences
+        temperature: 0.2,
+      },
+    });
+    // Hard 3s timeout — if the classifier is slow we'd rather fall back
+    // to regex than slow down chat. Race against a timeout promise.
+    const result = await Promise.race([
+      model.generateContent(prompt),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('classifier-timeout')), 3000)),
+    ]);
+    const text = result.response.text();
+    // Extract first {...} balanced object in case model returns extra text.
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) {
+      console.warn('[chat] LLM classifier returned non-JSON:', text.slice(0, 120));
+      return null;
+    }
+    const slice = text.slice(start, end + 1);
+    let parsed;
+    try {
+      parsed = JSON.parse(slice);
+    } catch {
+      // Apply the same bracket-balancer we use for the main chat JSON.
+      parsed = JSON.parse(balanceJsonBrackets(slice));
+    }
     if (parsed && typeof parsed.topic === 'string') {
       return {
         topic: parsed.topic,
@@ -618,7 +672,7 @@ Return this exact JSON shape:
       };
     }
   } catch (e) {
-    console.warn('[chat] LLM classifier failed:', e.message.slice(0, 120));
+    console.warn('[chat] LLM classifier failed:', String(e.message || e).slice(0, 160));
   }
   return null;
 }
@@ -1900,12 +1954,11 @@ app.post('/chat', async (req, res) => {
     const chunks = loadKnowledgeBase();
 
     // LLM-based classifier (gemini-flash-lite, ~$0.0001 + ~300ms).
-    // Returns specific topic, tailored vocab, AND a 'focus' instruction
-    // telling the main answering model which chart factor to anchor on.
-    // The focus is what stops every answer defaulting to current dasha.
-    // Falls back to the regex classifier if the LLM call fails, so the
-    // chat never breaks on classifier errors.
+    // Runs IN PARALLEL with nothing else for now — gated by a 3s hard
+    // timeout inside classifyQuestionWithLLM so it can't slow down chat.
+    const classifyStart = Date.now();
     let llmClass = await classifyQuestionWithLLM(question, chartData);
+    const classifyMs = Date.now() - classifyStart;
     let topics, enrichedQuery, focusInstruction = '', toneHint = 'neutral';
 
     if (llmClass) {
@@ -1923,12 +1976,16 @@ app.post('/chat', async (req, res) => {
       enrichedQuery = parts.join(' ').slice(0, 1500);
       focusInstruction = llmClass.focus || '';
       toneHint = llmClass.tone || 'neutral';
-      console.log(`[chat] LLM-class topic=${llmClass.topic} tone=${toneHint} focus="${focusInstruction.slice(0, 80)}"`);
+      console.log(`[chat] LLM-class ${classifyMs}ms topic=${llmClass.topic} tone=${toneHint} focus="${focusInstruction.slice(0, 80)}"`);
     } else {
-      // Regex fallback (existing behavior)
+      // Regex fallback. We synthesize a 'focus' instruction from the
+      // detected topic so the answer prompt STILL gets variety guidance
+      // even when the LLM classifier fails. This is what prevents the
+      // "same generic answer" you observed during fallback.
       topics = detectQuestionTopics(question);
       enrichedQuery = buildEnrichedQuery(question, chartData, topics);
-      console.log(`[chat] regex-fallback topics=[${topics.join(',')}]`);
+      focusInstruction = synthesizeFocusFromTopic(topics[0]);
+      console.log(`[chat] regex-fallback ${classifyMs}ms topics=[${topics.join(',')}] synth-focus="${focusInstruction.slice(0, 80)}"`);
     }
 
     const queryEmbedding = await getQueryEmbedding(enrichedQuery);
