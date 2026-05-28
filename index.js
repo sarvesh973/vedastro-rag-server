@@ -711,7 +711,25 @@ function formatChartForPrompt(chart) {
 // GEOCODING (convert place name to lat/lon)
 // =========================================
 
+// In-memory cache of geocoded results. Persists for the life of the
+// Render process (resets on deploy/restart, which is fine — Nominatim
+// data is stable and a deploy is rare). Keyed by the normalized place
+// name (lowercased + trimmed). Bounded so a flood of unique places
+// can't OOM the process.
+const _geocodeCache = new Map();
+const GEOCODE_CACHE_MAX = 2000;
+
 async function geocodePlace(placeName) {
+  if (!placeName) return null;
+  const key = String(placeName).toLowerCase().trim();
+  if (!key) return null;
+
+  // Cache hit (positive OR negative — we cache 'null' too so a bad
+  // place name doesn't burn Nominatim quota on every retry).
+  if (_geocodeCache.has(key)) {
+    return _geocodeCache.get(key);
+  }
+
   // Common Indian cities (offline fallback)
   const cities = {
     'gopalganj': { lat: 26.47, lon: 83.57 },
@@ -756,10 +774,36 @@ async function geocodePlace(placeName) {
     'allahabad': { lat: 25.4358, lon: 81.8463 },
     'prayagraj': { lat: 25.4358, lon: 81.8463 },
     'amritsar': { lat: 31.634, lon: 74.8723 },
+    'sultanpur': { lat: 26.2647, lon: 82.0727 },
+    'faridabad': { lat: 28.4089, lon: 77.3178 },
+    'ghaziabad': { lat: 28.6692, lon: 77.4538 },
+    'meerut': { lat: 28.9845, lon: 77.7064 },
+    'rajkot': { lat: 22.3039, lon: 70.8022 },
+    'vadodara': { lat: 22.3072, lon: 73.1812 },
+    'nashik': { lat: 19.9975, lon: 73.7898 },
+    'aurangabad': { lat: 19.8762, lon: 75.3433 },
+    'jabalpur': { lat: 23.1815, lon: 79.9864 },
+    'gwalior': { lat: 26.2183, lon: 78.1828 },
+    'jodhpur': { lat: 26.2389, lon: 73.0243 },
+    'udaipur': { lat: 24.5854, lon: 73.7125 },
+    'kota': { lat: 25.2138, lon: 75.8648 },
+    'bareilly': { lat: 28.367, lon: 79.4304 },
+    'aligarh': { lat: 27.8974, lon: 78.088 },
+    'moradabad': { lat: 28.8389, lon: 78.7378 },
+    'saharanpur': { lat: 29.968, lon: 77.5552 },
+    'jhansi': { lat: 25.4484, lon: 78.5685 },
+    'gorakhpur': { lat: 26.7606, lon: 83.3732 },
+    'siliguri': { lat: 26.7271, lon: 88.3953 },
+    'jamshedpur': { lat: 22.8046, lon: 86.2029 },
+    'dhanbad': { lat: 23.7957, lon: 86.4304 },
+    'cuttack': { lat: 20.4625, lon: 85.8828 },
+    'bhubaneswar': { lat: 20.2961, lon: 85.8245 },
   };
 
-  const key = placeName.toLowerCase().trim();
-  if (cities[key]) return cities[key];
+  if (cities[key]) {
+    _cacheSet(key, cities[key]);
+    return cities[key];
+  }
 
   // Try online geocoding via Nominatim (free, no key needed)
   try {
@@ -810,13 +854,28 @@ async function geocodePlace(placeName) {
     });
 
     if (Array.isArray(data) && data.length > 0) {
-      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+      const result = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+      _cacheSet(key, result);
+      return result;
     }
+    // Empty array = Nominatim found nothing. Negative-cache so we don't
+    // keep asking for the same impossible spelling.
+    _cacheSet(key, null);
   } catch (e) {
     console.log('Geocoding failed:', e.message);
+    // Don't cache on transient errors (network) — next call should retry.
   }
 
   return null;
+}
+
+function _cacheSet(key, value) {
+  // Evict oldest entry if at capacity (FIFO).
+  if (_geocodeCache.size >= GEOCODE_CACHE_MAX) {
+    const oldest = _geocodeCache.keys().next().value;
+    if (oldest !== undefined) _geocodeCache.delete(oldest);
+  }
+  _geocodeCache.set(key, value);
 }
 
 // Parse birth details from profile string
