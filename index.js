@@ -3341,10 +3341,23 @@ app.get('/horoscope/status', async (req, res) => {
   });
 });
 
-// POST /horoscope/generate — manually trigger pre-generation (admin)
+// POST /horoscope/generate — manually trigger pre-generation (admin).
+// ?force=true clears the cache first so existing (stale-shape) entries
+// are regenerated under the current prompt. Without ?force, the call
+// only fills MISSING entries — safe for incremental warmup.
 app.post('/horoscope/generate', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
-  res.json({ message: 'Pre-generation started in background', currentCache: horoscopeCache.size });
+  const force = req.query.force === 'true' || req.query.force === '1';
+  const sizeBefore = horoscopeCache.size;
+  if (force) horoscopeCache.clear();
+  res.json({
+    message: force
+      ? `Cache flushed (${sizeBefore} entries) — full regeneration started`
+      : 'Pre-generation started (filling missing entries only)',
+    flushed: force,
+    cacheSizeBefore: sizeBefore,
+    cacheSizeAfter: horoscopeCache.size,
+  });
   preGenerateAllHoroscopes().catch(err => console.error('[CRON] Error:', err));
 });
 
