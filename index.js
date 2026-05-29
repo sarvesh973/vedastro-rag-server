@@ -1439,8 +1439,32 @@ Generate JSON in EXACTLY this format:
   "luckyColor": "...",
   "luckyDay": "...",
   "rating": number,
-  "sources": "BPHS Ch.X; Phaladeepika Ch.Y Sloka Z"
+  "sources": "BPHS Ch.X; Phaladeepika Ch.Y Sloka Z",
+  "dailyVibe": [
+    "...",
+    "...",
+    "..."
+  ]
 }
+
+RULES FOR dailyVibe — STRICT:
+- EXACTLY 3 short bullet points. Each item maximum 60 characters.
+- Crisp, specific, real-life flavoured. Light dry humor allowed. NOT astrology jargon.
+- Each item must convey ONE concrete idea a real person can recognize today, derived from the same astrological reading above. Use the chart specifics (current dasha, key transit, ruling planet) to ground them, but say it in everyday language.
+- BAD examples (too vague, drop these):
+  * "Today, Friday, May 29, 2026, Gemini"            (just metadata)
+  * "In your professional sphere"                     (incomplete)
+  * "Your romantic life is highlighted today"         (says nothing)
+  * "Health is wealth, take care"                     (generic platitude)
+- GOOD examples (specific, observable, slight personality):
+  * "Reply to that one message you've been avoiding"
+  * "Money decision today, count twice, click once"
+  * "Sleep early, tomorrow's energy needs the runway"
+  * "Old friend texts. Pick up, don't 'k.' them"
+  * "Boss may surprise you. Stay sharp by 11 am"
+- One can be playful, one can be practical, one can be relational. Mix the tones.
+- NO em-dashes. Commas only. NO emojis. NO hashtags.
+- For weekly/monthly periods: same 3-bullet shape, but each bullet sketches a theme spanning the period instead of a single-day micro-event.
 
 Return ONLY valid JSON, no markdown.`;
 }
