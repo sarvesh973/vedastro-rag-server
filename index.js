@@ -3135,33 +3135,38 @@ app.get('/admin/export', async (req, res) => {
 // PRE-GENERATED HOROSCOPE SYSTEM
 // =========================================
 
-function getHoroscopeCacheKey(sign, period) {
+function getHoroscopeCacheKey(sign, period, language) {
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0]; // 2026-04-15
+  const langTag = String(language || 'hinglish').toLowerCase();
   // Weekly/monthly only change once per week/month
   if (period === 'weekly') {
     const weekStart = new Date(now);
     weekStart.setDate(now.getDate() - now.getDay());
-    return `${sign.toLowerCase()}_${period}_${weekStart.toISOString().split('T')[0]}`;
+    return `${sign.toLowerCase()}_${period}_${langTag}_${weekStart.toISOString().split('T')[0]}`;
   }
   if (period === 'monthly') {
-    return `${sign.toLowerCase()}_${period}_${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return `${sign.toLowerCase()}_${period}_${langTag}_${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   }
   if (period === 'tomorrow') {
     const tomorrow = new Date(now);
     tomorrow.setDate(now.getDate() + 1);
-    return `${sign.toLowerCase()}_${period}_${tomorrow.toISOString().split('T')[0]}`;
+    return `${sign.toLowerCase()}_${period}_${langTag}_${tomorrow.toISOString().split('T')[0]}`;
   }
-  return `${sign.toLowerCase()}_${period}_${dateStr}`;
+  return `${sign.toLowerCase()}_${period}_${langTag}_${dateStr}`;
 }
 
-async function generateSingleHoroscope(sign, period) {
+// Languages we pre-generate horoscopes for. Keep in sync with what the
+// Flutter app sends in the request body's `language` field.
+const HOROSCOPE_LANGUAGES = ['hinglish', 'english'];
+
+async function generateSingleHoroscope(sign, period, language) {
   try {
     const chunks = loadKnowledgeBase();
     const query = `${sign} horoscope ${period} predictions career love health transits`;
     const queryEmbedding = await getQueryEmbedding(query);
     const relevant = findRelevantChunks(queryEmbedding, chunks, 6);
-    const prompt = buildHoroscopePrompt(relevant, null, sign, period, null);
+    const prompt = buildHoroscopePrompt(relevant, null, sign, period, null, language);
     const responseText = await generateResponse(prompt);
 
     let horoscope;
@@ -3177,46 +3182,65 @@ async function generateSingleHoroscope(sign, period) {
     }
     return horoscope;
   } catch (err) {
-    console.error(`Failed to generate ${sign} ${period}:`, err.message);
+    console.error(`Failed to generate ${sign} ${period} ${language}:`, err.message);
     return null;
   }
 }
 
-async function preGenerateAllHoroscopes() {
-  console.log('[CRON] Starting horoscope pre-generation...');
+// Pre-generate horoscopes for the specified periods, across every sign
+// × every language. Called by three IST-midnight cron jobs:
+//   daily 00:00 IST every day -> ['daily', 'tomorrow']  (48 items, ~2 min)
+//   weekly 00:00 IST Sundays  -> ['weekly']             (24 items, ~1 min)
+//   monthly 00:00 IST on 1st  -> ['monthly']            (24 items, ~1 min)
+//
+// 2.5s spacing stays under Gemini's free-tier RPM cap. Already-cached
+// entries are skipped so a mid-day restart resumes cheaply instead of
+// burning quota re-doing yesterday's work.
+async function preGenerateHoroscopes(periods) {
+  const targetPeriods = Array.isArray(periods) && periods.length > 0
+    ? periods
+    : HOROSCOPE_PERIODS;
+  const label = `[CRON ${targetPeriods.join('+')}]`;
+  const total = ZODIAC_SIGNS.length * targetPeriods.length * HOROSCOPE_LANGUAGES.length;
+  console.log(`${label} Starting pre-generation: signs=${ZODIAC_SIGNS.length} periods=${targetPeriods.length} langs=${HOROSCOPE_LANGUAGES.length} total=${total}`);
   const startTime = Date.now();
-  let generated = 0, failed = 0;
+  let generated = 0, failed = 0, skipped = 0;
 
   for (const sign of ZODIAC_SIGNS) {
-    for (const period of HOROSCOPE_PERIODS) {
-      const cacheKey = getHoroscopeCacheKey(sign, period);
+    for (const period of targetPeriods) {
+      for (const language of HOROSCOPE_LANGUAGES) {
+        const cacheKey = getHoroscopeCacheKey(sign, period, language);
 
-      // Skip if already cached for this period
-      if (horoscopeCache.has(cacheKey)) {
-        continue;
+        if (horoscopeCache.has(cacheKey)) {
+          skipped++;
+          continue;
+        }
+
+        const horoscope = await generateSingleHoroscope(sign, period, language);
+        if (horoscope) {
+          horoscopeCache.set(cacheKey, {
+            data: horoscope,
+            sign, period, language,
+            generatedAt: new Date().toISOString(),
+          });
+          generated++;
+          console.log(`${label} ✓ ${sign} ${period} ${language}`);
+        } else {
+          failed++;
+        }
+
+        await new Promise(r => setTimeout(r, 2500));
       }
-
-      const horoscope = await generateSingleHoroscope(sign, period);
-      if (horoscope) {
-        horoscopeCache.set(cacheKey, {
-          data: horoscope,
-          sign,
-          period,
-          generatedAt: new Date().toISOString(),
-        });
-        generated++;
-        console.log(`[CRON] Generated: ${sign} ${period}`);
-      } else {
-        failed++;
-      }
-
-      // Small delay to respect rate limits (30 RPM for free tier)
-      await new Promise(r => setTimeout(r, 2500));
     }
   }
 
   const elapsed = Math.round((Date.now() - startTime) / 1000);
-  console.log(`[CRON] Done! Generated: ${generated}, Failed: ${failed}, Time: ${elapsed}s, Cache size: ${horoscopeCache.size}`);
+  console.log(`${label} Done. generated=${generated} failed=${failed} skipped=${skipped} elapsed=${elapsed}s cache.size=${horoscopeCache.size}`);
+}
+
+// Back-compat: existing admin /horoscope/generate endpoint calls this.
+async function preGenerateAllHoroscopes() {
+  return preGenerateHoroscopes(HOROSCOPE_PERIODS);
 }
 
 // Clean expired cache entries daily
@@ -3240,6 +3264,7 @@ function cleanExpiredCache() {
 // GET /horoscope/cached — serve pre-generated horoscopes (ZERO AI cost)
 app.get('/horoscope/cached', (req, res) => {
   const { sign: rawSign = 'Aries', period = 'daily' } = req.query;
+  const language = String(req.query.language || 'hinglish').toLowerCase();
 
   // Accept both English ("Aries") and Sanskrit ("Mesha (Aries)") forms
   const sign = normalizeSign(rawSign);
@@ -3249,8 +3274,11 @@ app.get('/horoscope/cached', (req, res) => {
   if (!HOROSCOPE_PERIODS.includes(period)) {
     return res.status(400).json({ error: 'period must be daily, tomorrow, weekly, or monthly' });
   }
+  if (!HOROSCOPE_LANGUAGES.includes(language)) {
+    return res.status(400).json({ error: `language must be one of ${HOROSCOPE_LANGUAGES.join(', ')}` });
+  }
 
-  const cacheKey = getHoroscopeCacheKey(sign, period);
+  const cacheKey = getHoroscopeCacheKey(sign, period, language);
   const cached = horoscopeCache.get(cacheKey);
 
   if (cached) {
@@ -3278,11 +3306,13 @@ app.get('/horoscope/status', async (req, res) => {
     key,
     sign: val.sign,
     period: val.period,
+    language: val.language || null,
     generatedAt: val.generatedAt,
   }));
   return res.json({
     totalCached: horoscopeCache.size,
-    maxPossible: ZODIAC_SIGNS.length * HOROSCOPE_PERIODS.length,
+    maxPossible: ZODIAC_SIGNS.length * HOROSCOPE_PERIODS.length * HOROSCOPE_LANGUAGES.length,
+    languages: HOROSCOPE_LANGUAGES,
     entries,
   });
 });
@@ -3294,18 +3324,54 @@ app.post('/horoscope/generate', async (req, res) => {
   preGenerateAllHoroscopes().catch(err => console.error('[CRON] Error:', err));
 });
 
-// Schedule: generate horoscopes every 6 hours
+// Schedule: pre-generate horoscopes at 00:00 IST per period type.
+//
+// node-cron 'timezone' option pins everything to Asia/Kolkata so the
+// jobs fire at midnight IST regardless of where the Render container
+// is physically running.
+//
+// Schedule layout:
+//   0 0 * * *   -> 00:00 every day      -> daily + tomorrow (48 items)
+//   0 0 * * 0   -> 00:00 every Sunday   -> weekly           (24 items)
+//   0 0 1 * *   -> 00:00 on the 1st     -> monthly          (24 items)
+//
+// On server boot we also kick off a one-time fill so a fresh deploy
+// during the day doesn't leave users staring at empty cache until the
+// next midnight tick. The initial fill skips anything already cached.
 function startHoroscopeCron() {
-  // Generate immediately on server start (with 30s delay to let server warm up)
+  const cron = require('node-cron');
+  const tz = 'Asia/Kolkata';
+
+  // Initial warmup: 30s after boot, generate whatever's missing.
   setTimeout(() => {
-    preGenerateAllHoroscopes().catch(err => console.error('[CRON] Initial generation error:', err));
+    console.log('[CRON] Initial post-boot fill — generating missing entries');
+    preGenerateAllHoroscopes().catch(err =>
+      console.error('[CRON] Initial generation error:', err));
   }, 30000);
 
-  // Then every 6 hours
-  setInterval(() => {
+  // Daily 00:00 IST — refresh daily + tomorrow for all 12 signs × 2 langs.
+  cron.schedule('0 0 * * *', () => {
+    console.log('[CRON] 00:00 IST — daily + tomorrow refresh');
     cleanExpiredCache();
-    preGenerateAllHoroscopes().catch(err => console.error('[CRON] Scheduled generation error:', err));
-  }, 6 * 60 * 60 * 1000);
+    preGenerateHoroscopes(['daily', 'tomorrow']).catch(err =>
+      console.error('[CRON] daily error:', err));
+  }, { timezone: tz });
+
+  // Sunday 00:00 IST — refresh weekly horoscopes.
+  cron.schedule('0 0 * * 0', () => {
+    console.log('[CRON] Sunday 00:00 IST — weekly refresh');
+    preGenerateHoroscopes(['weekly']).catch(err =>
+      console.error('[CRON] weekly error:', err));
+  }, { timezone: tz });
+
+  // 1st of month 00:00 IST — refresh monthly horoscopes.
+  cron.schedule('0 0 1 * *', () => {
+    console.log('[CRON] 1st-of-month 00:00 IST — monthly refresh');
+    preGenerateHoroscopes(['monthly']).catch(err =>
+      console.error('[CRON] monthly error:', err));
+  }, { timezone: tz });
+
+  console.log('[CRON] Horoscope pre-generation scheduled (IST midnight)');
 }
 
 // --- KEEP ALIVE (prevents Render free tier from sleeping) ---
