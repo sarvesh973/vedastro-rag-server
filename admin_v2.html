@@ -107,6 +107,31 @@
             </template>
           </div>
 
+          <!-- Horoscope cache controls -->
+          <div x-show="!loading && overview" class="p-4 rounded-lg bg-slate-900 border border-slate-800 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">Horoscope cache</div>
+                <div class="text-xs text-slate-500 mt-1">12 signs × 4 periods × 2 languages = 96 entries. Auto-refreshes at IST midnight.</div>
+              </div>
+              <button @click="regenerateHoroscopes(false)" :disabled="horoscopeBusy"
+                class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded">
+                <span x-text="horoscopeBusy ? 'Working…' : 'Fill missing'"></span>
+              </button>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button @click="regenerateHoroscopes(true)" :disabled="horoscopeBusy"
+                class="text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 rounded font-semibold">
+                Force regenerate all
+              </button>
+              <button @click="checkHoroscopeStatus()" :disabled="horoscopeBusy"
+                class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded">
+                Check status
+              </button>
+            </div>
+            <div x-show="horoscopeMessage" class="mt-3 text-xs text-slate-300 font-mono bg-slate-950 p-2 rounded whitespace-pre-wrap" x-text="horoscopeMessage"></div>
+          </div>
+
           <div x-show="!loading && overview" class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
               <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
@@ -585,6 +610,8 @@
         legacySessions: [],
         legacyOpen: {},     // key -> bool (expanded?)
         indexUrl: null,
+        horoscopeBusy: false,
+        horoscopeMessage: '',
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -893,6 +920,67 @@
             await this.doLookup();
           } finally {
             this.loading = false;
+          }
+        },
+
+        async regenerateHoroscopes(force) {
+          if (force) {
+            const ok = confirm(
+              'Force regenerate ALL 96 horoscopes? This flushes the cache ' +
+              'and rebuilds with the latest prompt. Takes ~4 minutes.\n\n' +
+              'Use this after a prompt change or when entries look stale.');
+            if (!ok) return;
+          }
+          this.horoscopeBusy = true;
+          this.horoscopeMessage = force
+            ? 'Flushing cache, kicking off full regen…'
+            : 'Filling missing entries…';
+          try {
+            const path = '/horoscope/generate' + (force ? '?force=true' : '');
+            const r = await this.fetchApi(path, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) {
+              this.horoscopeMessage = 'Failed: ' + (d.error || r.status);
+              return;
+            }
+            this.horoscopeMessage =
+              (d.message || 'Started') +
+              (typeof d.cacheSizeBefore !== 'undefined'
+                ? `\nCache before: ${d.cacheSizeBefore}, after: ${d.cacheSizeAfter}`
+                : '') +
+              '\n\nGeneration runs in background (~4 min for full set).\n' +
+              'Click "Check status" in a couple minutes to see progress.';
+          } catch (e) {
+            this.horoscopeMessage = 'Error: ' + e.message;
+          } finally {
+            this.horoscopeBusy = false;
+          }
+        },
+
+        async checkHoroscopeStatus() {
+          this.horoscopeBusy = true;
+          try {
+            const r = await this.fetchApi('/horoscope/status');
+            const d = await r.json();
+            if (!r.ok) {
+              this.horoscopeMessage = 'Failed: ' + (d.error || r.status);
+              return;
+            }
+            // Group entries by language for a clean summary.
+            const byLang = {};
+            for (const e of (d.entries || [])) {
+              const lang = e.language || 'unknown';
+              byLang[lang] = (byLang[lang] || 0) + 1;
+            }
+            const breakdown = Object.entries(byLang)
+              .map(([k, v]) => `  ${k}: ${v}`).join('\n');
+            this.horoscopeMessage =
+              `Cached: ${d.totalCached} / ${d.maxPossible}\n` +
+              `By language:\n${breakdown || '  (none)'}`;
+          } catch (e) {
+            this.horoscopeMessage = 'Error: ' + e.message;
+          } finally {
+            this.horoscopeBusy = false;
           }
         },
 
