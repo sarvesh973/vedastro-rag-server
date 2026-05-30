@@ -133,10 +133,15 @@ async function verifyAuth(req, res, { allowAnonymous = false } = {}) {
 // =========================================
 // Daily caps per UID per action. Admins always allowed.
 // Returns true if allowed; sends 429 + returns false if over limit.
+// Server daily caps — MUST match client-side caps in
+// lib/models/subscription_plan.dart (chatLimit / palmLimit).
+// Mismatch causes confusing UX: client says "you have 1 free chat"
+// but server allows 5 → user sends 4 more, then sees "5/5 limit
+// reached" message that doesn't match what we promised.
 const RATE_LIMITS = {
-  free:        { chat: 5,   palm: 1,  horoscope: 30,  chart: 10,  search: 20 },
-  trial:       { chat: 50,  palm: 5,  horoscope: 60,  chart: 60,  search: 100 },
-  standard:    { chat: 100, palm: 15, horoscope: 100, chart: 100, search: 200 },
+  free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20 },
+  trial:       { chat: 10,  palm: 2,  horoscope: 60,  chart: 60,  search: 100 },
+  standard:    { chat: 30,  palm: 5,  horoscope: 100, chart: 100, search: 200 },
   premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500 },
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0 },
 };
