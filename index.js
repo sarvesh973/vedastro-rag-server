@@ -2953,29 +2953,76 @@ app.get('/admin/api/user/:uid/chats', async (req, res) => {
   }
 });
 
-// POST /admin/api/user/:uid/premium  body: { isPremium: bool }
-// Grants or revokes premium directly on the user doc. The mobile app
-// reads `isPremium` from this doc on launch (FirestoreService.setPremium)
-// so the change takes effect on next app open.
+// POST /admin/api/user/:uid/premium  body: { isPremium: bool, plan?: 'standard'|'premium' }
+// Grants or revokes premium for a user. Writes to TWO places:
+//
+//   1. users/{uid}                                   (admin audit trail)
+//        - isPremium, premiumGrantedBy/At, premiumRevokedBy/At
+//
+//   2. users/{uid}/subscription/current              (what the APP reads)
+//        - state, plan, source, currentPeriodEndsAt, updatedAt
+//        - This is the doc the Razorpay webhook writes to and the
+//          mobile app reads via FirestoreService.loadCurrentSubscription
+//          and subscriptionStream. Without writing here, the app would
+//          stay on free tier even after the admin granted premium.
+//
+// On grant: state='active', plan=req.body.plan ?? 'premium', source=
+// 'admin-grant', currentPeriodEndsAt = 1 year from now (a sensible
+// far-future expiry so the app's isActive check passes indefinitely
+// without being literally "forever").
+//
+// On revoke: writes state='cancelled', cancelledAt=now to the
+// subscription doc so the app's gating flips immediately.
 app.post('/admin/api/user/:uid/premium', async (req, res) => {
   const auth = await requireAdmin(req, res);
   if (!auth) return;
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
   const isPremium = !!(req.body && req.body.isPremium);
+  const requestedPlan = (req.body && req.body.plan) || 'premium';
+  const now = firebaseAdmin.firestore.FieldValue.serverTimestamp();
   try {
+    // 1. User doc — audit trail
     await firestoreDb.collection('users').doc(req.params.uid).set({
       isPremium,
       premiumGrantedBy: isPremium ? auth.email : null,
-      premiumGrantedAt: isPremium
-        ? firebaseAdmin.firestore.FieldValue.serverTimestamp()
-        : null,
+      premiumGrantedAt: isPremium ? now : null,
       premiumRevokedBy: isPremium ? null : auth.email,
-      premiumRevokedAt: isPremium
-        ? null
-        : firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+      premiumRevokedAt: isPremium ? null : now,
     }, { merge: true });
-    res.json({ ok: true, isPremium });
+
+    // 2. Subscription doc — what the app actually reads
+    const subRef = firestoreDb
+      .doc(`users/${req.params.uid}/subscription/current`);
+    if (isPremium) {
+      // Far-future expiry (1 year). The app treats this as 'active'
+      // for the whole period. Admin can revoke at any time.
+      const expiresAt = new Date();
+      expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+      await subRef.set({
+        plan: requestedPlan,
+        state: 'active',
+        source: 'admin-grant',
+        grantedBy: auth.email,
+        currentPeriodEndsAt:
+          firebaseAdmin.firestore.Timestamp.fromDate(expiresAt),
+        updatedAt: now,
+      }, { merge: true });
+    } else {
+      // Revoke — flip to cancelled + zero out the period end so the
+      // app's isActive check stops returning true on next stream tick.
+      await subRef.set({
+        state: 'cancelled',
+        cancelledAt: now,
+        cancelledBy: auth.email,
+        currentPeriodEndsAt:
+          firebaseAdmin.firestore.Timestamp.fromDate(new Date(0)),
+        updatedAt: now,
+      }, { merge: true });
+    }
+
+    res.json({ ok: true, isPremium, plan: isPremium ? requestedPlan : null });
   } catch (e) {
+    console.error('[admin/user/premium]', e);
     res.status(500).json({ error: e.message });
   }
 });
