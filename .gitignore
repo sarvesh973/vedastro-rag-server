@@ -1,2 +1,5 @@
 node_modules/
 .env
+.env.*
+data/books/*.pdf
+data/ingest-state.json

@@ -1,0 +1,332 @@
+[
+  {
+    "chapter": 1,
+    "chapter_name": "Birth of Horasastra",
+    "start_line": 175,
+    "end_line": 192
+  },
+  {
+    "chapter": 2,
+    "chapter_name": "Meaning of Hora",
+    "start_line": 193,
+    "end_line": 207
+  },
+  {
+    "chapter": 3,
+    "chapter_name": "Rasi Description",
+    "start_line": 208,
+    "end_line": 339
+  },
+  {
+    "chapter": 4,
+    "chapter_name": "Planetary Characters",
+    "start_line": 340,
+    "end_line": 523
+  },
+  {
+    "chapter": 5,
+    "chapter_name": "Miscellaneous Matters",
+    "start_line": 524,
+    "end_line": 719
+  },
+  {
+    "chapter": 6,
+    "chapter_name": "(Yoga) Karakas",
+    "start_line": 720,
+    "end_line": 735
+  },
+  {
+    "chapter": 7,
+    "chapter_name": "Planetary Indications",
+    "start_line": 736,
+    "end_line": 784
+  },
+  {
+    "chapter": 8,
+    "chapter_name": "Conception",
+    "start_line": 785,
+    "end_line": 958
+  },
+  {
+    "chapter": 9,
+    "chapter_name": "Conditions at Birth",
+    "start_line": 959,
+    "end_line": 1090
+  },
+  {
+    "chapter": 10,
+    "chapter_name": "Evils at Birth",
+    "start_line": 1091,
+    "end_line": 1323
+  },
+  {
+    "chapter": 11,
+    "chapter_name": "Evils and the Moon",
+    "start_line": 1324,
+    "end_line": 1368
+  },
+  {
+    "chapter": 12,
+    "chapter_name": "Evils Canceled at Birth",
+    "start_line": 1369,
+    "end_line": 1407
+  },
+  {
+    "chapter": 13,
+    "chapter_name": "Lunar Yogas",
+    "start_line": 1408,
+    "end_line": 1518
+  },
+  {
+    "chapter": 14,
+    "chapter_name": "Yogas from the Sun",
+    "start_line": 1519,
+    "end_line": 1556
+  },
+  {
+    "chapter": 15,
+    "chapter_name": "Conjunctions of Two Planets",
+    "start_line": 1557,
+    "end_line": 1632
+  },
+  {
+    "chapter": 16,
+    "chapter_name": "Conjunctions of 3 Planets",
+    "start_line": 1633,
+    "end_line": 1770
+  },
+  {
+    "chapter": 17,
+    "chapter_name": "Four Planets in Conjunction",
+    "start_line": 1771,
+    "end_line": 1897
+  },
+  {
+    "chapter": 18,
+    "chapter_name": "Effects of Conjunction of Five Planets",
+    "start_line": 1898,
+    "end_line": 1977
+  },
+  {
+    "chapter": 19,
+    "chapter_name": "Effects of 6 Planets in Conjunction",
+    "start_line": 1978,
+    "end_line": 2009
+  },
+  {
+    "chapter": 20,
+    "chapter_name": "Combinations For Renunciation",
+    "start_line": 2010,
+    "end_line": 2127
+  },
+  {
+    "chapter": 21,
+    "chapter_name": "Nabhasa Yogas",
+    "start_line": 2128,
+    "end_line": 2304
+  },
+  {
+    "chapter": 22,
+    "chapter_name": "Effects of the Sun",
+    "start_line": 2305,
+    "end_line": 2493
+  },
+  {
+    "chapter": 23,
+    "chapter_name": "Effects of Moon in Various Rasis",
+    "start_line": 2494,
+    "end_line": 2759
+  },
+  {
+    "chapter": 24,
+    "chapter_name": "Effects of Moon in Various Navansas",
+    "start_line": 2760,
+    "end_line": 2871
+  },
+  {
+    "chapter": 25,
+    "chapter_name": "Effects of Mars in Various Rasis",
+    "start_line": 2872,
+    "end_line": 3060
+  },
+  {
+    "chapter": 26,
+    "chapter_name": "Effects of Mercury in Various Rasis",
+    "start_line": 3061,
+    "end_line": 3249
+  },
+  {
+    "chapter": 27,
+    "chapter_name": "Effects of Jupiter in Various Signs",
+    "start_line": 3250,
+    "end_line": 3444
+  },
+  {
+    "chapter": 28,
+    "chapter_name": "Effects of Venus in Various Signs",
+    "start_line": 3445,
+    "end_line": 3620
+  },
+  {
+    "chapter": 29,
+    "chapter_name": "Effects of Saturn in Various Rasis",
+    "start_line": 3621,
+    "end_line": 3800
+  },
+  {
+    "chapter": 30,
+    "chapter_name": "Effects of Planets in Bhavas",
+    "start_line": 3801,
+    "end_line": 4034
+  },
+  {
+    "chapter": 31,
+    "chapter_name": "Two Planets in Angles",
+    "start_line": 4035,
+    "end_line": 4287
+  },
+  {
+    "chapter": 32,
+    "chapter_name": "Ninth House And Effects Thereof",
+    "start_line": 4288,
+    "end_line": 4581
+  },
+  {
+    "chapter": 33,
+    "chapter_name": "Tenth House And Effects Thereof",
+    "start_line": 4582,
+    "end_line": 4788
+  },
+  {
+    "chapter": 34,
+    "chapter_name": "Different Houses and Worldly Affairs",
+    "start_line": 4789,
+    "end_line": 5044
+  },
+  {
+    "chapter": 35,
+    "chapter_name": "Raja Yogas",
+    "start_line": 5045,
+    "end_line": 5577
+  },
+  {
+    "chapter": 36,
+    "chapter_name": "Planetary Rays",
+    "start_line": 5578,
+    "end_line": 5651
+  },
+  {
+    "chapter": 37,
+    "chapter_name": "Panchamahapurusha Yogas",
+    "start_line": 5652,
+    "end_line": 5725
+  },
+  {
+    "chapter": 38,
+    "chapter_name": "Effects Of Natural Constituents And Primordial Compounds",
+    "start_line": 5726,
+    "end_line": 5826
+  },
+  {
+    "chapter": 39,
+    "chapter_name": "Obstructions To RajaYogas",
+    "start_line": 5827,
+    "end_line": 5890
+  },
+  {
+    "chapter": 40,
+    "chapter_name": "Calculation of Longevity",
+    "start_line": 5891,
+    "end_line": 5977
+  },
+  {
+    "chapter": 41,
+    "chapter_name": "Moola Dasa",
+    "start_line": 5978,
+    "end_line": 6199
+  },
+  {
+    "chapter": 42,
+    "chapter_name": "Effects Of Sub Periods",
+    "start_line": 6200,
+    "end_line": 6390
+  },
+  {
+    "chapter": 43,
+    "chapter_name": "Evil Effects Of Dasa",
+    "start_line": 6391,
+    "end_line": 6399
+  },
+  {
+    "chapter": 44,
+    "chapter_name": "Antidotes For Evils Of Dasas",
+    "start_line": 6400,
+    "end_line": 6410
+  },
+  {
+    "chapter": 45,
+    "chapter_name": "Effects of Planetary Dignities",
+    "start_line": 6411,
+    "end_line": 6562
+  },
+  {
+    "chapter": 46,
+    "chapter_name": "Female Horoscopy",
+    "start_line": 6563,
+    "end_line": 6679
+  },
+  {
+    "chapter": 47,
+    "chapter_name": "Aphorisms of Death",
+    "start_line": 6680,
+    "end_line": 6825
+  },
+  {
+    "chapter": 48,
+    "chapter_name": "Lost Horoscopy",
+    "start_line": 6826,
+    "end_line": 6950
+  },
+  {
+    "chapter": 49,
+    "chapter_name": "Effects Of Horas",
+    "start_line": 6951,
+    "end_line": 7041
+  },
+  {
+    "chapter": 50,
+    "chapter_name": "Effects Of Decanates",
+    "start_line": 7042,
+    "end_line": 7173
+  },
+  {
+    "chapter": 51,
+    "chapter_name": "Effects Of Navansas",
+    "start_line": 7174,
+    "end_line": 7508
+  },
+  {
+    "chapter": 52,
+    "chapter_name": "Lost Horoscopy",
+    "start_line": 7509,
+    "end_line": 7579
+  },
+  {
+    "chapter": 53,
+    "chapter_name": "AshtakaVarga",
+    "start_line": 7580,
+    "end_line": 7650
+  },
+  {
+    "chapter": 54,
+    "chapter_name": "Effects Of AshtakaVarga",
+    "start_line": 7651,
+    "end_line": 7731
+  },
+  {
+    "chapter": 55,
+    "chapter_name": "Manifold Births",
+    "start_line": 7732,
+    "end_line": 7862
+  }
+]

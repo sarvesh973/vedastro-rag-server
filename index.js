@@ -450,12 +450,28 @@ function loadKnowledgeBase() {
   if (knowledgeBase) return knowledgeBase;
   try {
     knowledgeBase = require('./knowledge_base.json');
+    // KB on disk can be an Array OR an indexed object {"0": {...}, ...}.
+    // Normalise to an array so downstream code (cosine search) doesn't
+    // care which shape was written by the original loader vs the
+    // ingest-runner's appender.
+    if (!Array.isArray(knowledgeBase)) {
+      knowledgeBase = Object.values(knowledgeBase);
+    }
     console.log(`Knowledge base loaded: ${knowledgeBase.length} chunks`);
   } catch (e) {
     console.error('Failed to load knowledge base:', e.message);
     knowledgeBase = [];
   }
   return knowledgeBase;
+}
+
+// Force-reload from disk (used after the ingest-runner appends new
+// chunks so the changes are searchable without a server restart).
+function reloadKnowledgeBase() {
+  knowledgeBase = null;
+  // Bust require cache so disk re-read picks up the updated JSON.
+  delete require.cache[require.resolve('./knowledge_base.json')];
+  return loadKnowledgeBase();
 }
 
 // --- VECTOR SIMILARITY ---
@@ -3198,6 +3214,86 @@ app.post('/admin/api/user/:uid/premium', async (req, res) => {
     console.error('[admin/user/premium]', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// =========================================
+// BOOK INGESTION (in-process, admin-triggered)
+// =========================================
+//
+// POST /admin/api/ingest-book   body: { book, txtPath, mapPath }
+// GET  /admin/api/ingest-status
+// GET  /admin/api/download/knowledge-base
+//
+// Designed to be safe on a live Render service:
+//   - background job (HTTP returns 202 immediately)
+//   - serial embed requests (no parallel fan-out)
+//   - setImmediate yields between batches so /chat stays responsive
+//   - 100ms inter-request delay = 10 req/sec (well under text-
+//     embedding-004's 1500 req/min free-tier limit)
+//   - in-memory KB reloaded on completion (no Render restart needed)
+//   - Render's ephemeral disk resets on next deploy — admin downloads
+//     the resulting knowledge_base.json via /download endpoint and
+//     commits it to git for permanence.
+
+app.post('/admin/api/ingest-book', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  const { book, txtPath, mapPath } = req.body || {};
+  if (!book || !txtPath || !mapPath) {
+    return res.status(400).json({ error: 'Missing book / txtPath / mapPath' });
+  }
+  // Allow paths relative to the project root for safety.
+  const fs = require('fs');
+  const path = require('path');
+  const txt = path.resolve(__dirname, txtPath);
+  const map = path.resolve(__dirname, mapPath);
+  if (!txt.startsWith(__dirname) || !map.startsWith(__dirname)) {
+    return res.status(400).json({ error: 'Paths must be inside the project root' });
+  }
+  if (!fs.existsSync(txt) || !fs.existsSync(map)) {
+    return res.status(404).json({ error: 'Text or map file not found in repo' });
+  }
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'GEMINI_API_KEY not configured on server' });
+
+  try {
+    const { startIngestion } = require('./lib/ingest-runner');
+    const job = await startIngestion({
+      book, txtPath: txt, mapPath: map, apiKey,
+      reloadKB: () => reloadKnowledgeBase(),
+    });
+    res.status(202).json({
+      message: 'Ingestion started in background',
+      job,
+      poll: '/admin/api/ingest-status',
+    });
+  } catch (e) {
+    res.status(409).json({ error: e.message });
+  }
+});
+
+app.get('/admin/api/ingest-status', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  const { getCurrentJob, loadState } = require('./lib/ingest-runner');
+  const live = getCurrentJob();
+  if (live) return res.json(live);
+  const persisted = loadState();
+  if (persisted) return res.json(persisted);
+  return res.json({ status: 'idle' });
+});
+
+// Download the current knowledge_base.json so admin can commit the
+// updated corpus to git (Render disk is ephemeral; without committing
+// the ingested chunks vanish on next deploy).
+app.get('/admin/api/download/knowledge-base', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  const fs = require('fs');
+  const path = require('path');
+  const file = path.join(__dirname, 'knowledge_base.json');
+  if (!fs.existsSync(file)) return res.status(404).json({ error: 'KB not found' });
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition',
+    `attachment; filename="knowledge_base_${new Date().toISOString().slice(0, 10)}.json"`);
+  fs.createReadStream(file).pipe(res);
 });
 
 // ─── Legacy HTML conversation viewer (ADMIN_KEY) ────────────────────

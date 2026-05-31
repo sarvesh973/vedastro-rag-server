@@ -132,6 +132,40 @@
             <div x-show="horoscopeMessage" class="mt-3 text-xs text-slate-300 font-mono bg-slate-950 p-2 rounded whitespace-pre-wrap" x-text="horoscopeMessage"></div>
           </div>
 
+          <!-- Book ingestion (RAG expansion) -->
+          <div x-show="!loading && overview" class="p-4 rounded-lg bg-slate-900 border border-slate-800 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">Book ingestion (RAG corpus)</div>
+                <div class="text-xs text-slate-500 mt-1">Add classical texts to the retrieval base. Runs in background, embed-throttled (10 req/sec) so /chat stays responsive.</div>
+              </div>
+              <button @click="checkIngestStatus()" :disabled="ingestBusy"
+                class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded">Status</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+              <input x-model="ingestBook" placeholder="Book name (e.g. Saravali)"
+                class="bg-slate-950 border border-slate-800 rounded text-xs px-2 py-1.5 font-mono">
+              <input x-model="ingestTxt" placeholder="Text path (data/books/x.txt)"
+                class="bg-slate-950 border border-slate-800 rounded text-xs px-2 py-1.5 font-mono">
+              <input x-model="ingestMap" placeholder="Map path (data/books/x-map.json)"
+                class="bg-slate-950 border border-slate-800 rounded text-xs px-2 py-1.5 font-mono">
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button @click="startIngest()" :disabled="ingestBusy"
+                class="text-xs px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded font-semibold">
+                Start ingestion
+              </button>
+              <a :href="'/admin/api/download/knowledge-base'" download
+                class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">
+                Download knowledge_base.json
+              </a>
+              <span class="text-xs text-slate-500 self-center ml-2">
+                Render disk is ephemeral — download + commit to git when ingestion finishes, otherwise next deploy resets it.
+              </span>
+            </div>
+            <div x-show="ingestMessage" class="mt-3 text-xs text-slate-300 font-mono bg-slate-950 p-2 rounded whitespace-pre-wrap" x-text="ingestMessage"></div>
+          </div>
+
           <div x-show="!loading && overview" class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
               <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
@@ -612,6 +646,11 @@
         indexUrl: null,
         horoscopeBusy: false,
         horoscopeMessage: '',
+        ingestBusy: false,
+        ingestMessage: '',
+        ingestBook: 'Saravali',
+        ingestTxt: 'data/books/saravali.txt',
+        ingestMap: 'data/books/saravali-chapter-map.json',
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -981,6 +1020,62 @@
             this.horoscopeMessage = 'Error: ' + e.message;
           } finally {
             this.horoscopeBusy = false;
+          }
+        },
+
+        async startIngest() {
+          if (!this.ingestBook || !this.ingestTxt || !this.ingestMap) {
+            this.ingestMessage = 'Fill in all three fields.'; return;
+          }
+          if (!confirm(`Start ingestion for "${this.ingestBook}"?\n\nThis runs in the background — may take 5-15 min depending on book size. /chat stays responsive throughout. When done, click "Download knowledge_base.json" and commit it to git.`)) return;
+          this.ingestBusy = true;
+          this.ingestMessage = 'Starting ingestion...';
+          try {
+            const r = await this.fetchApi('/admin/api/ingest-book', {
+              method: 'POST',
+              body: JSON.stringify({
+                book: this.ingestBook,
+                txtPath: this.ingestTxt,
+                mapPath: this.ingestMap,
+              }),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+              this.ingestMessage = 'Failed: ' + (d.error || r.status);
+              return;
+            }
+            this.ingestMessage = (d.message || 'Started') +
+              `\nTotal chunks to embed: ${d.job?.total ?? '?'}\n\nClick Status periodically to watch progress.`;
+          } catch (e) {
+            this.ingestMessage = 'Error: ' + e.message;
+          } finally {
+            this.ingestBusy = false;
+          }
+        },
+
+        async checkIngestStatus() {
+          this.ingestBusy = true;
+          try {
+            const r = await this.fetchApi('/admin/api/ingest-status');
+            const d = await r.json();
+            if (!r.ok) { this.ingestMessage = 'Failed: ' + (d.error || r.status); return; }
+            if (d.status === 'idle') {
+              this.ingestMessage = 'No ingestion job running or recorded.';
+              return;
+            }
+            const pct = d.total ? Math.round((d.embedded / d.total) * 100) : 0;
+            this.ingestMessage =
+              `${d.book} — ${d.status}\n` +
+              `Embedded: ${d.embedded}/${d.total} (${pct}%)\n` +
+              `Failed: ${d.failed}\n` +
+              `Appended to KB: ${d.appended || 0}\n` +
+              (d.startedAt ? `Started: ${d.startedAt}\n` : '') +
+              (d.completedAt ? `Completed: ${d.completedAt}\n` : '') +
+              (d.errors && d.errors.length ? `\nRecent errors:\n  ${d.errors.slice(-3).join('\n  ')}` : '');
+          } catch (e) {
+            this.ingestMessage = 'Error: ' + e.message;
+          } finally {
+            this.ingestBusy = false;
           }
         },
 
