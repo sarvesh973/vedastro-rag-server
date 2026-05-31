@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getKundli, Observer } = require('@prisri/jyotish');
+const { computeAshtakavarga } = require('./lib/ashtakavarga');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
 // timezone, luxon converts local birth time -> UTC with historical DST.
 const { find: geoTzFind } = require('geo-tz');
@@ -888,6 +889,12 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       d20Summary['Ascendant'] = chart.vargas.d20.ascendant?.rashiName;
     }
 
+    // Ashtakavarga — the classical predictive scoring system. Every
+    // house gets a Sarvashtaka score (0-56) telling the LLM which
+    // houses are strong vs weak. Powers transit-trigger predictions
+    // that the LLM previously had to invent from thin air.
+    const ashtakavarga = computeAshtakavarga(chart);
+
     return {
       ascendant: {
         sign: chart.ascendant.rashiName,
@@ -907,6 +914,7 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       d9Navamsha: d9Summary,
       d10Dasamsa: d10Summary,
       d20Vimshamsha: d20Summary,
+      ashtakavarga,
       houses: chart.houses.map(h => ({
         number: h.number,
         sign: h.sign,
@@ -955,6 +963,28 @@ function formatChartForPrompt(chart) {
   for (const h of chart.houses) {
     const pList = h.planets.length > 0 ? ` (${h.planets.join(', ')})` : '';
     text += `\n- House ${h.number}: ${h.sign}${pList}`;
+  }
+
+  // Ashtakavarga — feeds the LLM a CONCRETE strength score for every
+  // house so predictions can be grounded in classical Vedic technique
+  // instead of LLM intuition. Use SAV (Sarvashtaka) score per house:
+  // 31+ = strong (transits deliver), 25-30 = average, <25 = weak.
+  if (chart.ashtakavarga) {
+    const av = chart.ashtakavarga;
+    text += `\n\nASHTAKAVARGA (Predictive house strength — classical):`;
+    text += `\nSarvashtaka per house (out of 56, total=${av.sarvashtakaTotal}):`;
+    av.sarvashtaka.forEach((score, i) => {
+      text += `\n- House ${i + 1}: ${score} bindus (${av.houseLabels[i]})`;
+    });
+    text += `\nBhinnashtaka totals (per-planet contribution, max 56 each):`;
+    for (const p of ['Sun', 'Moon', 'Mars', 'Mercury', 'Jupiter', 'Venus', 'Saturn']) {
+      const sum = av.bhinnashtaka[p].reduce((a, b) => a + b, 0);
+      text += `\n- ${p}: ${sum} total`;
+    }
+    text += `\n\nUSE the Sarvashtaka scores when predicting transit effects:`;
+    text += `\n- Transit to a STRONG house (31+) = result manifests visibly.`;
+    text += `\n- Transit to a WEAK house (<25) = result fizzles or is delayed.`;
+    text += `\n- Combine with current dasha lord's bindus in destination house.`;
   }
 
   return text;
