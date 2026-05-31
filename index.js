@@ -1339,7 +1339,7 @@ function languageDirective(language) {
     'Never use Devanagari script.';
 }
 
-function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language, classifier) {
+function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, chartData, language, classifier, matchedRules) {
   const focus = classifier && classifier.focus ? classifier.focus : '';
   const tone = classifier && classifier.tone ? classifier.tone : 'neutral';
   const topic = classifier && classifier.topic ? classifier.topic : 'general';
@@ -1350,6 +1350,12 @@ Tone for THIS reply: ${tone}.
 Sub-topic: ${topic}.
 `
     : '';
+
+  // Rule engine — when the question matches a domain we have encoded
+  // rules for (marriage etc.), inject the matched ones and require
+  // the LLM to anchor its answer around them.
+  const { formatRulesForPrompt } = require('./lib/rules/evaluator');
+  const rulesBlock = formatRulesForPrompt(matchedRules || []);
   const versesContext = relevantChunks
     .map((c, i) => `[Source ${i + 1}: ${c.book} Ch.${c.chapter} "${c.chapter_name}", Verses ${c.verse_range}]\n${c.text}`)
     .join('\n\n---\n\n');
@@ -1458,6 +1464,7 @@ ${profileContext}
 ${chartContext}
 
 ${focusBlock}
+${rulesBlock}
 ${historyContext}
 
 REFERENCE VERSES (use these for accuracy — DO NOT cite them by name in your reply):
@@ -2181,10 +2188,27 @@ app.post('/chat', async (req, res) => {
     const candidates = findRelevantChunks(queryEmbedding, chunks, 24);
     const relevant = selectDiverseChunks(candidates, 8, 0.7);
     console.log(`[chat] picked ${relevant.length} chunks, top score=${(candidates[0]?.score || 0).toFixed(3)}, books=${[...new Set(relevant.map(c => c.book))].join('+')}`);
+
+    // RULE ENGINE — evaluate matched classical rules for the question's
+    // domain. The LLM gets these as facts to cite, and is instructed
+    // not to invent predictions outside them. This is the architectural
+    // shift from "LLM hallucinates astrology" to "deterministic engine
+    // + LLM as natural-language presenter".
+    let matchedRules = [];
+    if (chartData) {
+      const { evaluateDomain, topicToDomain } = require('./lib/rules/evaluator');
+      const domain = topicToDomain(topics[0] || (llmClass && llmClass.topic));
+      if (domain) {
+        matchedRules = evaluateDomain(chartData, domain, { topN: 6 });
+        console.log(`[chat] rule-engine domain=${domain} matched=${matchedRules.length}/20`);
+      }
+    }
+
     const prompt = buildChatPrompt(
       question, relevant, userProfile, chatHistory, chartData,
       (req.body && req.body.language) || 'hinglish',
       { focus: focusInstruction, tone: toneHint, topic: topics[0] || 'general' },
+      matchedRules,
     );
     // Chat uses default model order (flash first, lite fallback) for
     // best answer quality. Flash-lite latency experiment was reverted

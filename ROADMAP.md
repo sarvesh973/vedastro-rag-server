@@ -156,35 +156,41 @@ Hora desktop).
 
 ## Phase 2 — Rule engine + first rules (Month 3)
 
-### Week 7
-- [ ] **Rule schema** (`lib/rules/schema.js`)
-  ```js
-  type AstroRule = {
-    id: string,
-    domain: 'marriage' | 'career' | 'wealth' | 'health' | ...,
-    source: { book, chapter, verse },
-    predicate: (chart) => { matched, intensity, evidence },
-    prediction: { polarity, text, timeframe },
-    cancellations: AstroRule[],
-  }
-  ```
-- [ ] **Rule evaluator** (`lib/rules/evaluator.js`)
-  - Takes chart + question domain → returns ranked matched rules
-  - Applies cancellation logic (e.g. Mangal Dosha cancelled by Saturn
-    in 7th, etc.)
+### Week 7 ✅ DONE
+- [x] **Rule schema** (`lib/rules/schema.js`) — typed AstroRule
+      shape with predicate / prediction / source / cancellation
+      semantics + shared chart-fact helpers (planetHouse, lordOfHouse,
+      isExalted, aspectsHouse, planetsInHouse, etc.)
+- [x] **Rule evaluator** (`lib/rules/evaluator.js`) — given a chart
+      and a domain, runs all rules, applies cancellation, sorts by
+      intensity, returns top N matched. Also exposes topicToDomain()
+      (maps classifier topics like 'marriage_timing' → 'marriage')
+      and formatRulesForPrompt() (renders matched rules as an
+      LLM-citable block).
 
-### Week 8
-- [ ] **First 20 marriage rules** (`lib/rules/marriage.js`)
-  - From BPHS Ch.80 + Phaladeepika Ch.19 + Saravali Ch.34
-  - Each manually encoded after reading the verse
-  - Examples:
-    - "7th lord in 6/8/12 + afflicted by malefic = marriage delays" (Phaladeepika 19.7)
-    - "Venus in own/exalted sign in 7th + aspected by Jupiter = happy marriage" (BPHS 80.12)
-    - "Mars in 1/4/7/8/12 from Lagna/Moon/Venus = Mangal Dosha" + 9 cancellation rules
-- [ ] **LLM presenter mode** (`lib/rules/presenter.js`)
-  - System prompt explicitly forbids inventing predictions
-  - Takes top 5 matched rules + RAG verses → writes user-friendly answer
-  - Every claim cited
+### Week 8 ✅ DONE
+- [x] **First 20 marriage rules** (`lib/rules/marriage.js`)
+      Encoded from BPHS Ch.80, Phaladeepika Ch.19, Saravali Ch.34,
+      Jaimini Sutras Ch.1. Covers:
+      - Positives: Venus in 7th, Jupiter aspects 7th, 7th lord in
+        kendra, 7th lord own/exalted, Venus-Jupiter conjunction
+      - Timing: Venus dasha active, 7th-lord dasha active
+      - Negatives: 7th lord in dusthana, 7th lord debilitated,
+        Venus debilitated, Saturn in 7th (mixed/late), Sun in 7th
+        (ego clashes), Rahu in 7th (unconventional), Ketu in 7th
+        (detached), Mangal Dosha (with 3 classical cancellations),
+        malefics in 2nd+7th
+      - Misc: multiple planets in 7th, D9 7th lord debilitated,
+        Darakaraka strong in D9 (Jaimini)
+- [x] **LLM presenter mode** — formatRulesForPrompt() renders matched
+      rules as a numbered, source-cited block with explicit instruction
+      to the model not to invent predictions outside this list. Wired
+      into the chat endpoint: when topic maps to a domain we have
+      rules for, the matched rules ride along in the prompt.
+- [x] Verified on test chart (Jul 9 2003, Delhi): 3/20 marriage rules
+      matched with strong positive polarity (Jupiter aspects 7th
+      dignified intensity 9, 7th lord exalted intensity 8, Venus dasha
+      active intensity 7) — exactly what a Jyotishi would highlight.
 
 ### Week 9
 - [ ] **50 career rules** (BPHS Ch.49, Phaladeepika Ch.6, Saravali Ch.28)
@@ -338,7 +344,7 @@ These are NOT part of this roadmap:
 | Phase | Weeks | Status |
 |---|---|---|
 | Phase 1 — Calculation rigor | 1-6 | ✅ DONE — all 6 weeks shipped |
-| Phase 2 — Rule engine + first rules | 7-12 | Not started |
+| Phase 2 — Rule engine + first rules | 7-12 | 33% — W7-W8 shipped (20 marriage rules live) |
 | Phase 3 — Books + Lal Kitab | 13-16 | Not started |
 | Phase 4 — Validation | 17-20 | Not started |
 | Phase 5 — Polish + marketing | 21-24 | Not started |
