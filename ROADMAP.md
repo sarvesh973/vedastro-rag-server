@@ -288,6 +288,48 @@ alongside BPHS Ch.81 (Putra Bhava) and Phaladeepika Ch.20.
       role, and the classical "no children before Saturn return"
       timing caveat.
 
+### Week 14 ✅ DONE — 4 new domains shipped (substitute deliverable)
+Continued the "ship from existing books" strategy while waiting on
+Sarvarth Chintamani / Lal Kitab PDFs.
+
+- [x] **`lib/rules/education.js`** (20 rules) — BPHS Ch.44+50,
+      Phaladeepika Ch.5, Saravali. Covers: 4th lord strength
+      (foundational), Mercury as vidya karaka, Jupiter aspects on
+      education houses, 5th house (exam success), Budhaditya yoga
+      for academic recognition, 9th lord (higher ed), Saraswati Yoga
+      conditions, 2nd house (memory), structural negatives, elemental
+      learning styles, timing via Mercury/Jupiter dashas.
+
+- [x] **`lib/rules/foreign.js`** (18 rules) — BPHS Ch.55+43,
+      Phaladeepika Ch.21, Saravali. Covers: 12th lord placement (key
+      foreign indicator), Rahu in 7th/12th (foreign partner/residence),
+      9th-12th house mutual connections, lagna lord in 12th (settles
+      abroad), Moon in water sign (sea travel), career-foreign links
+      (10th→12th), timing via Rahu dasha (primary trigger), Jupiter
+      in 12th (ethical foreign work), Saturn in 12th (delayed foreign),
+      Ketu in 12th (spiritual foreign), null-result rule.
+
+- [x] **`lib/rules/family.js`** (18 rules) — BPHS Ch.46+47+48,
+      Phaladeepika, Saravali. Covers MOTHER (4th lord + Moon karaka),
+      FATHER (9th lord + Sun karaka), SIBLINGS (3rd lord + Mars karaka),
+      ELDER siblings (11th house), extended family (2nd house),
+      Venus aspect on 4th (harmonious home), Jupiter in 2nd (ethical
+      family), timing via 4L/Moon/9L/Sun dashas. Both positive and
+      negative patterns encoded with cancellation logic.
+
+- [x] **`lib/rules/spirituality.js`** (16 rules) — BPHS Ch.43+55+59,
+      Phaladeepika Ch.8+21, Saravali Ch.20. Covers: 9th lord (dharma),
+      Jupiter in 9th (guru karaka), Ketu in 1/9/12 (moksha pull),
+      12th lord strong, Sanyasa Yoga (4+ planets in same sign),
+      5th house (purva punya / devotion), 8th house (occult/tantric),
+      Saturn-aspect-9th (disciplined dharma), Jupiter-Ketu (Guru
+      Chandala — DIY spirituality), pilgrimage yogas, Venus 12th
+      (bhakti), Mahapurusha in kendra (spiritual force), null-result.
+
+- [x] **Topic mapper expanded** — topicToDomain() now resolves
+      education/foreign/family/spirituality topic strings from the
+      LLM classifier to their rule domains.
+
 ### Week 14
 - [ ] **Index Sarvarth Chintamani** — timing-of-events specialist.
   Most predictive of all classical books for specific date windows.
@@ -406,7 +448,7 @@ These are NOT part of this roadmap:
 |---|---|---|
 | Phase 1 — Calculation rigor | 1-6 | ✅ DONE — all 6 weeks shipped |
 | Phase 2 — Rule engine + first rules | 7-12 | ✅ DONE — 95 rules across 4 domains + extraction/ingestion scripts |
-| Phase 3 — Books + Lal Kitab | 13-16 | 25% — Saravali fully indexed + children domain (20 rules) shipped. Brihat Jataka / Jaimini / Lal Kitab / Sarvarth Chintamani blocked on source PDFs |
+| Phase 3 — Books + Lal Kitab | 13-16 | 50% — Saravali indexed + 5 new rule domains (children/education/foreign/family/spirituality, 92 rules). Brihat Jataka / Jaimini / Lal Kitab / Sarvarth Chintamani blocked on source PDFs |
 | Phase 4 — Validation | 17-20 | Not started |
 | Phase 5 — Polish + marketing | 21-24 | Not started |
 
