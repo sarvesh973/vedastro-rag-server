@@ -8,6 +8,7 @@ const { computeAshtakavarga } = require('./lib/ashtakavarga');
 const { detectAllYogas } = require('./lib/yogas');
 const { computeKarakas } = require('./lib/karakas');
 const { computeShadbala } = require('./lib/shadbala');
+const { computeTransits } = require('./lib/transits');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
 // timezone, luxon converts local birth time -> UTC with historical DST.
 const { find: geoTzFind } = require('geo-tz');
@@ -914,6 +915,14 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     // dasha results vs which fizzle.
     const shadbala = computeShadbala(chart);
 
+    // Transits — current Saturn/Jupiter positions vs natal chart.
+    // Detects Sade Sati, Dhaiya, Jupiter favourable transits, and
+    // double-transit triggers (the strongest classical event-timing
+    // signal). Recomputed per request because slow planets do move
+    // daily — but slowly enough that day-to-day differences in
+    // sub-degree positions don't change the macro classifications.
+    const transits = computeTransits(chart);
+
     return {
       ascendant: {
         sign: chart.ascendant.rashiName,
@@ -937,6 +946,7 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       yogas,
       karakas,
       shadbala,
+      transits,
       houses: chart.houses.map(h => ({
         number: h.number,
         sign: h.sign,
@@ -985,6 +995,40 @@ function formatChartForPrompt(chart) {
   for (const h of chart.houses) {
     const pList = h.planets.length > 0 ? ` (${h.planets.join(', ')})` : '';
     text += `\n- House ${h.number}: ${h.sign}${pList}`;
+  }
+
+  // ─── CURRENT TRANSITS — the strongest event-timing signal ───
+  if (chart.transits) {
+    const t = chart.transits;
+    text += `\n\nCURRENT TRANSITS (live, as of ${t.asOf}):`;
+    if (t.currentPositions.Saturn) {
+      text += `\n- Saturn now in ${t.currentPositions.Saturn.sign}`;
+    }
+    if (t.currentPositions.Jupiter) {
+      text += `\n- Jupiter now in ${t.currentPositions.Jupiter.sign}`;
+    }
+    if (t.currentPositions.Rahu) {
+      text += `\n- Rahu now in ${t.currentPositions.Rahu.sign}, Ketu in ${t.currentPositions.Ketu.sign}`;
+    }
+    if (t.sadeSati && t.sadeSati.active) {
+      text += `\n\n⚠️ SADE SATI ACTIVE (${t.sadeSati.phase} phase):`;
+      text += `\n  ${t.sadeSati.description}`;
+    }
+    if (t.dhaiya && t.dhaiya.active) {
+      text += `\n\n⚠️ ${t.dhaiya.phase.toUpperCase()} (Saturn 4th/8th from Moon):`;
+      text += `\n  ${t.dhaiya.description}`;
+    }
+    if (t.jupiter) {
+      text += `\n\nJupiter transit: ${t.jupiter.description}`;
+    }
+    if (t.doubleTransits && t.doubleTransits.length > 0) {
+      text += `\n\n🔥 DOUBLE-TRANSIT ALERTS (Saturn + Jupiter both aspecting a house):`;
+      for (const dt of t.doubleTransits) {
+        text += `\n  - ${dt.description}`;
+      }
+      text += `\n  (Classical "double transit" is the strongest single event-timing trigger.`;
+      text += ` When asked "when will X happen?", check if X's house is in this list.)`;
+    }
   }
 
   // ─── YOGAS — classical chart configurations detected as facts ───

@@ -136,15 +136,21 @@ Hora desktop).
       (the simplified version still solves the "which planet has
       capacity to deliver" question well enough for now)
 
-### Week 6
-- [ ] **Transit calculator** (`lib/transits.js`)
-  - For each slow planet (Saturn, Jupiter, Rahu, Ketu), where are they
-    NOW vs natal positions
-  - Sade Sati / Dhaiya detector (Saturn near natal Moon)
-  - Double-transit alerts (Saturn AND Jupiter both aspecting same house)
-  - Cross-reference with Ashtakavarga for delivery prediction
+### Week 6 ✅ DONE
+- [x] **Transit calculator** (`lib/transits.js`)
+- [x] Live current positions of Saturn, Jupiter, Rahu, Ketu (today's
+      ephemeris, recomputed per request)
+- [x] **Sade Sati detector** — 3 phases (starting/peak/ending) with
+      distinct classical descriptions
+- [x] **Dhaiya detector** — Ardha Ashtami + Ashtami Shani
+- [x] **Jupiter transit favourability** from natal Moon (per
+      Phaladeepika Ch.26 — favourable houses 2,5,7,9,11)
+- [x] **Double-transit alerts** — Saturn AND Jupiter both aspecting
+      a natal house = classical strongest event-timing signal
+- [x] Each transit hit comes with a description the LLM cites as fact
+      (no LLM interpretation of what "Sade Sati" means; we tell it)
 
-**End of Phase 1: calculation rigor matches Jagannatha Hora.**
+**End of Phase 1 ✅ — calculation rigor matches Jagannatha Hora.**
 
 ---
 
@@ -331,7 +337,7 @@ These are NOT part of this roadmap:
 
 | Phase | Weeks | Status |
 |---|---|---|
-| Phase 1 — Calculation rigor | 1-6 | 83% — W1-5 shipped, only W6 (Transits) left |
+| Phase 1 — Calculation rigor | 1-6 | ✅ DONE — all 6 weeks shipped |
 | Phase 2 — Rule engine + first rules | 7-12 | Not started |
 | Phase 3 — Books + Lal Kitab | 13-16 | Not started |
 | Phase 4 — Validation | 17-20 | Not started |
