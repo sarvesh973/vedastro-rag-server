@@ -166,6 +166,73 @@
             <div x-show="ingestMessage" class="mt-3 text-xs text-slate-300 font-mono bg-slate-950 p-2 rounded whitespace-pre-wrap" x-text="ingestMessage"></div>
           </div>
 
+          <!-- Rule-engine validation -->
+          <div x-show="!loading && overview" class="p-4 rounded-lg bg-slate-900 border border-slate-800 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="font-semibold text-sm uppercase tracking-wide text-slate-400">Rule-engine validation</div>
+                <div class="text-xs text-slate-500 mt-1">Run engine against the celebrity test suite — measures accuracy of timing predictions against documented historical events.</div>
+              </div>
+              <button @click="runValidation()" :disabled="valBusy"
+                class="text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 rounded font-semibold">
+                <span x-text="valBusy ? 'Running…' : 'Run validation'"></span>
+              </button>
+            </div>
+            <div x-show="valReport" class="mt-3">
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                <div class="p-3 rounded bg-slate-950 border border-slate-800">
+                  <div class="text-xs text-slate-500 uppercase">Charts</div>
+                  <div class="text-xl font-bold text-purple-300" x-text="valReport?.totalCharts"></div>
+                </div>
+                <div class="p-3 rounded bg-slate-950 border border-slate-800">
+                  <div class="text-xs text-slate-500 uppercase">Events</div>
+                  <div class="text-xl font-bold text-purple-300" x-text="valReport?.totalEvents"></div>
+                </div>
+                <div class="p-3 rounded bg-slate-950 border border-slate-800">
+                  <div class="text-xs text-slate-500 uppercase">Strict (timing)</div>
+                  <div class="text-xl font-bold text-emerald-400"><span x-text="valReport?.hits"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.hitRate"></span>%)</span></div>
+                </div>
+                <div class="p-3 rounded bg-slate-950 border border-slate-800">
+                  <div class="text-xs text-slate-500 uppercase">Combined</div>
+                  <div class="text-xl font-bold text-amber-300"><span x-text="(valReport?.hits || 0) + (valReport?.softHits || 0)"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.combinedRate"></span>%)</span></div>
+                </div>
+              </div>
+              <div class="rounded bg-slate-950 border border-slate-800 overflow-hidden">
+                <table class="w-full text-xs font-mono">
+                  <thead class="bg-slate-900 text-slate-500 uppercase tracking-wide">
+                    <tr>
+                      <th class="px-3 py-2 text-left">Domain</th>
+                      <th class="px-3 py-2 text-right">Events</th>
+                      <th class="px-3 py-2 text-right">Strict</th>
+                      <th class="px-3 py-2 text-right">Combined</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(s, d) in (valReport?.byDomain || {})" :key="d">
+                      <tr class="border-t border-slate-800">
+                        <td class="px-3 py-1.5 text-slate-200" x-text="d"></td>
+                        <td class="px-3 py-1.5 text-right text-slate-400" x-text="s.events"></td>
+                        <td class="px-3 py-1.5 text-right text-emerald-400">
+                          <span x-text="s.hits"></span>/<span x-text="s.events"></span>
+                          (<span x-text="Math.round(s.hits * 100 / s.events)"></span>%)
+                        </td>
+                        <td class="px-3 py-1.5 text-right text-amber-300">
+                          <span x-text="s.hits + s.softHits"></span>/<span x-text="s.events"></span>
+                          (<span x-text="Math.round((s.hits + s.softHits) * 100 / s.events)"></span>%)
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <details class="mt-3">
+                <summary class="text-xs text-slate-400 cursor-pointer hover:text-slate-200">Per-chart breakdown (click to expand)</summary>
+                <div class="text-xs font-mono whitespace-pre-wrap mt-2 bg-slate-950 p-2 rounded max-h-96 overflow-y-auto" x-text="formatPerChart(valReport)"></div>
+              </details>
+            </div>
+            <div x-show="valError" class="mt-3 text-xs text-rose-300 font-mono bg-rose-950 p-2 rounded" x-text="valError"></div>
+          </div>
+
           <div x-show="!loading && overview" class="grid md:grid-cols-2 gap-4">
             <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
               <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
@@ -651,6 +718,9 @@
         ingestBook: 'Saravali',
         ingestTxt: 'data/books/saravali.txt',
         ingestMap: 'data/books/saravali-chapter-map.json',
+        valBusy: false,
+        valReport: null,
+        valError: '',
         lookupQuery: '',
         lookupAttempted: false,
         lookupResult: null,
@@ -1077,6 +1147,37 @@
           } finally {
             this.ingestBusy = false;
           }
+        },
+
+        async runValidation() {
+          this.valBusy = true; this.valError = ''; this.valReport = null;
+          try {
+            const r = await this.fetchApi('/admin/api/validation/run');
+            const d = await r.json();
+            if (!r.ok) { this.valError = d.error || 'Failed: ' + r.status; return; }
+            this.valReport = d;
+          } catch (e) {
+            this.valError = e.message;
+          } finally {
+            this.valBusy = false;
+          }
+        },
+
+        formatPerChart(report) {
+          if (!report || !report.perChart) return '';
+          const lines = [];
+          for (const c of report.perChart) {
+            if (c.error) { lines.push(c.name + ' — ERROR: ' + c.error); continue; }
+            lines.push(c.name + ' (' + (c.rodden || '?') + ')');
+            for (const e of (c.events || [])) {
+              const marker = e.outcome.hit === true ? '✓' : (e.outcome.hit === 'soft' ? '~' : '✗');
+              lines.push('  ' + marker + ' ' + e.date + ' [' + e.domain + '] ' +
+                e.description + ' — dasha ' + e.activeDasha +
+                ' — ' + e.matchedRules + ' rules — ' + e.outcome.reason);
+            }
+            lines.push('');
+          }
+          return lines.join('\n');
         },
 
         formatTime(iso) {

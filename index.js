@@ -3284,6 +3284,24 @@ app.get('/admin/api/ingest-status', async (req, res) => {
 // Download the current knowledge_base.json so admin can commit the
 // updated corpus to git (Render disk is ephemeral; without committing
 // the ingested chunks vanish on next deploy).
+// =========================================
+// VALIDATION (admin) — Phase 4
+// =========================================
+// Runs the rule engine against the celebrity validation set and
+// returns the accuracy report. Sync (returns in ~2 sec on full set).
+
+app.get('/admin/api/validation/run', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  try {
+    const { runValidation } = require('./lib/validation/runner');
+    const report = runValidation();
+    res.json(report);
+  } catch (e) {
+    console.error('[validation]', e);
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
 app.get('/admin/api/download/knowledge-base', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
   const fs = require('fs');
