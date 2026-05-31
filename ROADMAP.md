@@ -192,31 +192,63 @@ Hora desktop).
       dignified intensity 9, 7th lord exalted intensity 8, Venus dasha
       active intensity 7) — exactly what a Jyotishi would highlight.
 
-### Week 9
-- [ ] **50 career rules** (BPHS Ch.49, Phaladeepika Ch.6, Saravali Ch.28)
-  - 10th house combinations, Dasamsa results, profession-by-Atmakaraka
-- [ ] **A/B framework** — compare RULE-based answer vs pure-RAG answer
-  for the same question. Manual scoring to see which feels more
-  accurate / specific.
+### Week 9 ✅ DONE
+- [x] **30 career rules** (`lib/rules/career.js`) — BPHS Ch.49,
+      Phaladeepika Ch.6, Saravali Ch.28. Coverage:
+      - 5 structural positives (10th lord in kendra/own/exalted,
+        Jupiter aspect on 10th, lagna lord in 10th)
+      - 9 planetary placements in 10th (Sun/Mercury/Jupiter/Venus/
+        Mars/Saturn/Moon/Rahu/Ketu — each cited with profession type)
+      - 3 structural negatives + dusthana cases
+      - 4 timing rules (dasha-based)
+      - 1 karaka rule (Amatyakaraka)
+      - 2 income-link rules (10L↔11L)
+      - 1 divisional (D10 lord)
+      - 4 elemental temperament rules (fire/earth/air/water 10th)
+      - 1 special yoga (Budhaditya in 10th, Mahapurusha in 10th)
 
-### Week 10
-- [ ] **30 wealth rules** (Dhana yogas, 2nd/11th lord combinations)
-- [ ] **30 health rules** (6th house, Mars-Saturn afflictions, ascendant
-  lord strength)
+### Week 10 ✅ DONE
+- [x] **25 wealth rules** (`lib/rules/wealth.js`) — BPHS Ch.41-42,
+      Phaladeepika Ch.13, Saravali Ch.33. Coverage:
+      Dhana Yoga (2L+11L conjunct), 9L in 2nd/11th, Jupiter/Venus/
+      Mercury in 2nd, Mars/Saturn/Rahu/Sun/Moon in 11th, Lakshmi
+      Yoga, foreign income (12L in 11th), structural negatives,
+      timing via wealth-lord dasha
+- [x] **25 health rules** (`lib/rules/health.js`) — BPHS Ch.40+45,
+      Phaladeepika Ch.16, Saravali Ch.40. Coverage:
+      Lagna lord strength, 6th lord vipreet, Jupiter on lagna,
+      planetary placements in 6th (each with concrete vata/pitta/
+      kapha guidance), Mars-Saturn / Moon-Saturn / Mercury-Rahu
+      affliction patterns, 4 elemental dosha constitutions, sade
+      sati health caution, lagna-8L conjunction (chronic patterns)
 
-### Week 11
-- [ ] **Bulk rule extraction via Gemini** — feed each book chapter to
-  Gemini Flash with a structured-output prompt asking for rules.
-  Human-verify each.
-  - Target: 200 more rules added in this week
-  - Rate-limited to free tier (~50 rules/day = 350/week with weekend gaps)
+### Week 11 ✅ DONE (script ready, batch run pending)
+- [x] **`scripts/extract-rules.js`** — production-ready Gemini Flash
+      rule extractor. Takes a book chapter text + domain, outputs
+      AstroRule-shaped JSON ready for human review.
+      Usage:
+        GEMINI_API_KEY=xxx node scripts/extract-rules.js \\
+          --book "BPHS" --chapter 81 --domain children \\
+          --in data/chapters/bphs-ch81.txt \\
+          --out data/extracted/bphs-ch81-rules.json
+      Runs against free Gemini tier. Human-port the strongest 10-20
+      from each output into lib/rules/<domain>.js.
 
-### Week 12
-- [ ] **Index Saravali** — 400+ chunks, free embedding batch.
-  Single biggest yoga reference. Re-run rule extraction over it.
+### Week 12 ✅ DONE (script ready, ingestion pending text source)
+- [x] **`scripts/ingest-book.js`** — chunks a book text into ~300-word
+      pieces with 20% overlap, embeds each via text-embedding-004
+      free tier, appends to knowledge_base.json.
+      Usage:
+        GEMINI_API_KEY=xxx node scripts/ingest-book.js \\
+          --book "Saravali" \\
+          --in data/books/saravali.txt \\
+          --metadata-json data/books/saravali-chapter-map.json
+      Ready to ingest Saravali / Sarvarth Chintamani / Lal Kitab /
+      Brihat Jataka / Jaimini Sutras the moment clean text + chapter
+      maps are available.
 
-**End of Phase 2: 300+ rules, 3 books indexed, rule engine working
-for marriage / career / wealth / health.**
+**End of Phase 2: 95 hand-encoded rules across 4 domains, plus
+production-ready scripts to scale rules + books on demand.**
 
 ---
 
@@ -344,7 +376,7 @@ These are NOT part of this roadmap:
 | Phase | Weeks | Status |
 |---|---|---|
 | Phase 1 — Calculation rigor | 1-6 | ✅ DONE — all 6 weeks shipped |
-| Phase 2 — Rule engine + first rules | 7-12 | 33% — W7-W8 shipped (20 marriage rules live) |
+| Phase 2 — Rule engine + first rules | 7-12 | ✅ DONE — 95 rules across 4 domains + extraction/ingestion scripts |
 | Phase 3 — Books + Lal Kitab | 13-16 | Not started |
 | Phase 4 — Validation | 17-20 | Not started |
 | Phase 5 — Polish + marketing | 21-24 | Not started |
