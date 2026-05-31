@@ -2131,6 +2131,19 @@ app.post('/chat', async (req, res) => {
       sources,
       chartUsed: !!chartData,
       currentDasha: chartData ? `${chartData.dasha.mahadasha}/${chartData.dasha.antardasha}` : null,
+      // Admin-only diagnostic block — the mobile app surfaces these
+      // under chat bubbles for admin sign-ins (gated client-side).
+      // Lets us SEE in real chats which topic + focus instruction the
+      // classifier picked, without trawling Render logs.
+      _debug: {
+        topic: (llmClass && llmClass.topic) || topics[0] || 'general',
+        topicSource: llmClass ? 'llm' : 'regex',
+        tone: toneHint,
+        focus: focusInstruction,
+        books: [...new Set(relevant.map(c => c.book))],
+        chunks: relevant.map(c => `${c.book} Ch.${c.chapter}`),
+        classifyMs: parallelMs,
+      },
     });
   } catch (err) {
     console.error('Chat error:', err);
