@@ -234,18 +234,31 @@ Hora desktop).
       Runs against free Gemini tier. Human-port the strongest 10-20
       from each output into lib/rules/<domain>.js.
 
-### Week 12 ✅ DONE (script ready, ingestion pending text source)
-- [x] **`scripts/ingest-book.js`** — chunks a book text into ~300-word
-      pieces with 20% overlap, embeds each via text-embedding-004
-      free tier, appends to knowledge_base.json.
-      Usage:
-        GEMINI_API_KEY=xxx node scripts/ingest-book.js \\
-          --book "Saravali" \\
-          --in data/books/saravali.txt \\
-          --metadata-json data/books/saravali-chapter-map.json
-      Ready to ingest Saravali / Sarvarth Chintamani / Lal Kitab /
-      Brihat Jataka / Jaimini Sutras the moment clean text + chapter
-      maps are available.
+### Week 12 ✅ DONE — Saravali fully ingested
+- [x] **`scripts/ingest-book.js`** + **`lib/ingest-runner.js`** —
+      production-safe background ingestion that runs on Render
+      without blocking /chat. Serial requests, 100ms throttle,
+      setImmediate yields, state persisted, in-memory KB
+      auto-reloaded on completion. Admin dashboard panel for
+      start/status/download.
+- [x] **`scripts/pdf-to-text.js`** — extracts a Vedic-astrology PDF
+      to .txt + auto-builds a chapter map by detecting
+      `Chapter N` lines (skips TOC entries by requiring body text
+      within 5 lines).
+- [x] **Saravali ingested** — Kalyana Varma's classic, 534KB / 7861
+      lines / 55 chapters. 386 chunks embedded successfully with
+      gemini-embedding-001 (3072-dim, matching the rest of the KB).
+      6 transient failures (1.5% — bad UTF-8 in source PDF).
+- [x] **Critical model-mismatch bug found + fixed** — original
+      ingest-runner used text-embedding-004 (768-dim) but the
+      query embedder is gemini-embedding-001 (3072-dim). Mixing
+      dimensions would have made new chunks invisible. Pinned both
+      to gemini-embedding-001.
+- [x] **Retrieval verified** — query "Raja yoga combinations" now
+      returns 6 of 8 top hits from Saravali Ch.35, plus Phaladeepika
+      Ch.7 and BPHS Ch.39. Cross-source coverage is real.
+
+**Corpus now: 935 chunks across 3 books (was 549 across 2).**
 
 **End of Phase 2: 95 hand-encoded rules across 4 domains, plus
 production-ready scripts to scale rules + books on demand.**
@@ -254,10 +267,26 @@ production-ready scripts to scale rules + books on demand.**
 
 ## Phase 3 — Books + Lal Kitab (Month 4)
 
-### Week 13
-- [ ] **Index Brihat Jataka + Jaimini Sutras**
-- [ ] **Karaka rules from Jaimini Sutras** — chara dasha, Atmakaraka
-  effects, padas. Entirely new predictive paradigm.
+### Week 13 ⏸ PARTIALLY DONE — Brihat Jataka + Jaimini Sutras blocked
+- [ ] **Index Brihat Jataka** — blocked on clean PDF/text source.
+      The ingestion script + admin endpoint are ready; the moment
+      a copy lands in `data/books/`, ingestion is one click in the
+      admin dashboard.
+- [ ] **Index Jaimini Sutras** — same situation; blocked on source.
+- [ ] **Karaka rules from Jaimini Sutras** — depends on indexing.
+
+### Week 13 ✅ DONE — Children domain (substitute deliverable)
+Pivoted while waiting on Brihat Jataka / Jaimini Sutras PDFs.
+Used the newly-indexed Saravali Ch.8 (Conception) as a third source
+alongside BPHS Ch.81 (Putra Bhava) and Phaladeepika Ch.20.
+- [x] **20 children rules** (`lib/rules/children.js`)
+      Covers: 5th lord placement/dignity, Jupiter as putra karaka,
+      Saptamsa (D7) signals, planetary occupants of 5th (each with
+      specific child-related guidance), timing via 5th-lord dasha,
+      Mangal/Saturn afflictions reducing fertility prospects, special
+      yogas (Putra Yoga, Santati combinations), 9th-lord secondary
+      role, and the classical "no children before Saturn return"
+      timing caveat.
 
 ### Week 14
 - [ ] **Index Sarvarth Chintamani** — timing-of-events specialist.
@@ -377,7 +406,7 @@ These are NOT part of this roadmap:
 |---|---|---|
 | Phase 1 — Calculation rigor | 1-6 | ✅ DONE — all 6 weeks shipped |
 | Phase 2 — Rule engine + first rules | 7-12 | ✅ DONE — 95 rules across 4 domains + extraction/ingestion scripts |
-| Phase 3 — Books + Lal Kitab | 13-16 | Not started |
+| Phase 3 — Books + Lal Kitab | 13-16 | 25% — Saravali fully indexed + children domain (20 rules) shipped. Brihat Jataka / Jaimini / Lal Kitab / Sarvarth Chintamani blocked on source PDFs |
 | Phase 4 — Validation | 17-20 | Not started |
 | Phase 5 — Polish + marketing | 21-24 | Not started |
 
