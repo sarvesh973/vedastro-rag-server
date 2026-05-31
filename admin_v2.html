@@ -179,7 +179,7 @@
               </button>
             </div>
             <div x-show="valReport" class="mt-3">
-              <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+              <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-3">
                 <div class="p-3 rounded bg-slate-950 border border-slate-800">
                   <div class="text-xs text-slate-500 uppercase">Charts</div>
                   <div class="text-xl font-bold text-purple-300" x-text="valReport?.totalCharts"></div>
@@ -188,13 +188,19 @@
                   <div class="text-xs text-slate-500 uppercase">Events</div>
                   <div class="text-xl font-bold text-purple-300" x-text="valReport?.totalEvents"></div>
                 </div>
-                <div class="p-3 rounded bg-slate-950 border border-slate-800">
-                  <div class="text-xs text-slate-500 uppercase">Strict (timing)</div>
-                  <div class="text-xl font-bold text-emerald-400"><span x-text="valReport?.hits"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.hitRate"></span>%)</span></div>
+                <div class="p-3 rounded bg-slate-950 border border-slate-800" title="2+ strong timing rules, polarity-aligned with event">
+                  <div class="text-xs text-slate-500 uppercase">Strict ⭐</div>
+                  <div class="text-xl font-bold text-emerald-400"><span x-text="valReport?.hitsStrict"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.hitRateStrict"></span>%)</span></div>
+                  <div class="text-[10px] text-slate-600 mt-1">defensible accuracy</div>
                 </div>
-                <div class="p-3 rounded bg-slate-950 border border-slate-800">
+                <div class="p-3 rounded bg-slate-950 border border-slate-800" title="Any timing rule fires for the event dasha">
+                  <div class="text-xs text-slate-500 uppercase">Basic timing</div>
+                  <div class="text-xl font-bold text-amber-300"><span x-text="valReport?.hits"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.hitRate"></span>%)</span></div>
+                  <div class="text-[10px] text-slate-600 mt-1">support signal present</div>
+                </div>
+                <div class="p-3 rounded bg-slate-950 border border-slate-800" title="Any matched rule (timing or lifetime structure)">
                   <div class="text-xs text-slate-500 uppercase">Combined</div>
-                  <div class="text-xl font-bold text-amber-300"><span x-text="(valReport?.hits || 0) + (valReport?.softHits || 0)"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.combinedRate"></span>%)</span></div>
+                  <div class="text-xl font-bold text-slate-300"><span x-text="(valReport?.hits || 0) + (valReport?.softHits || 0)"></span> <span class="text-sm text-slate-500">(<span x-text="valReport?.combinedRate"></span>%)</span></div>
                 </div>
               </div>
               <div class="rounded bg-slate-950 border border-slate-800 overflow-hidden">
