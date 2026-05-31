@@ -5,6 +5,9 @@ const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getKundli, Observer } = require('@prisri/jyotish');
 const { computeAshtakavarga } = require('./lib/ashtakavarga');
+const { detectAllYogas } = require('./lib/yogas');
+const { computeKarakas } = require('./lib/karakas');
+const { computeShadbala } = require('./lib/shadbala');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
 // timezone, luxon converts local birth time -> UTC with historical DST.
 const { find: geoTzFind } = require('geo-tz');
@@ -895,6 +898,22 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     // that the LLM previously had to invent from thin air.
     const ashtakavarga = computeAshtakavarga(chart);
 
+    // Yogas — 18 classical chart configurations detected as facts
+    // (Gajakesari, Pancha Mahapurusha, Vipreet Rajayoga, Raja Yoga
+    // etc). Each matched yoga's effect is cited verbatim from the
+    // source text instead of left to LLM interpretation.
+    const yogas = detectAllYogas(chart);
+
+    // Karakas — Jaimini 7-grade significator chain. Atmakaraka
+    // = soul lesson, Darakaraka = spouse signature. Pure ranking by
+    // degree-in-sign (with Rahu reversal convention).
+    const karakas = computeKarakas(chart);
+
+    // Shadbala (simplified) — ranks planets by relative strength so
+    // the LLM knows which planets have CAPACITY to deliver their
+    // dasha results vs which fizzle.
+    const shadbala = computeShadbala(chart);
+
     return {
       ascendant: {
         sign: chart.ascendant.rashiName,
@@ -915,6 +934,9 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       d10Dasamsa: d10Summary,
       d20Vimshamsha: d20Summary,
       ashtakavarga,
+      yogas,
+      karakas,
+      shadbala,
       houses: chart.houses.map(h => ({
         number: h.number,
         sign: h.sign,
@@ -963,6 +985,46 @@ function formatChartForPrompt(chart) {
   for (const h of chart.houses) {
     const pList = h.planets.length > 0 ? ` (${h.planets.join(', ')})` : '';
     text += `\n- House ${h.number}: ${h.sign}${pList}`;
+  }
+
+  // ─── YOGAS — classical chart configurations detected as facts ───
+  if (chart.yogas && chart.yogas.matched && chart.yogas.matched.length > 0) {
+    text += `\n\nACTIVE YOGAS (deterministically detected — cite these as fact):`;
+    for (const y of chart.yogas.matched) {
+      text += `\n- ${y.name} (${y.source}): ${y.evidence}`;
+      text += `\n    EFFECT: ${y.effect}`;
+    }
+    text += `\n(If user asks about life path, mention the strongest matched yoga by name + effect.)`;
+  }
+
+  // ─── KARAKAS — Jaimini significator chain ───
+  if (chart.karakas) {
+    text += `\n\nKARAKAS (Jaimini chain — soul lesson + key signifiers):`;
+    if (chart.karakas.Atmakaraka) {
+      text += `\n- Atmakaraka (soul): ${chart.karakas.Atmakaraka.planet}`;
+      text += `\n    ${chart.karakas.Atmakaraka.lesson}`;
+    }
+    if (chart.karakas.Darakaraka) {
+      text += `\n- Darakaraka (spouse signifier): ${chart.karakas.Darakaraka.planet}`;
+      text += `\n    ${chart.karakas.Darakaraka.spouseNature}`;
+    }
+    if (chart.karakas.Amatyakaraka) {
+      text += `\n- Amatyakaraka (career advisor): ${chart.karakas.Amatyakaraka.planet}`;
+    }
+  }
+
+  // ─── SHADBALA RANKING — which planets have CAPACITY ───
+  if (chart.shadbala) {
+    text += `\n\nPLANETARY STRENGTH RANKING (Shadbala, simplified):`;
+    const ranked = Object.entries(chart.shadbala)
+      .filter(([k]) => k !== '_note')
+      .sort((a, b) => a[1].rank - b[1].rank);
+    for (const [p, v] of ranked) {
+      text += `\n- #${v.rank} ${p}: ${v.relativeStrength}/100 (${v.label})`;
+    }
+    text += `\nUSE: when predicting dasha results, factor in dasha-lord's rank.`;
+    text += ` A strong planet (top 3) in its dasha DELIVERS results visibly;`;
+    text += ` a weak planet (bottom 3) in its dasha produces muted / delayed results.`;
   }
 
   // Ashtakavarga — feeds the LLM a CONCRETE strength score for every

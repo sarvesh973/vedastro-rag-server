@@ -103,42 +103,38 @@ Hora desktop).
       LLM grounds transit predictions in real bindu scores instead of
       inventing them
 
-### Week 3 — IN PROGRESS
-- [ ] **Yoga detector** (`lib/yogas.js`)
-  - Encode 30-50 most-cited classical yogas with hard rules:
-    - Gajakesari (Moon-Jupiter mutual kendra)
-    - Pancha Mahapurusha — Hamsa (Jupiter), Malavya (Venus),
-      Ruchaka (Mars), Bhadra (Mercury), Sasa (Saturn) in own/exalted
-      sign + a kendra
-    - Vipreet Rajayoga (lord of dusthana in another dusthana)
-    - Raj Yoga (kendra-trikona lord exchange/conjunction)
-    - Dhana Yogas (2nd/11th lord combinations)
-    - Saraswati, Lakshmi, Budhaditya, Chandra-Mangal, Adhi Yoga
-    - Kalsarpa, Kemadruma (negative yogas with cancellations)
-  - Each yoga is a `ChartPredicate` that evaluates against a chart and
-    returns `{ matched: bool, sources: [...], description: '...' }`
-  - Inject matched yogas into prompt so LLM cites them as fact
+### Week 3 ✅ DONE
+- [x] **Yoga detector** (`lib/yogas.js`) — 18 yogas encoded with hard
+      rules + cancellation logic:
+      Gajakesari, Pancha Mahapurusha (Hamsa, Malavya, Ruchaka, Bhadra,
+      Sasa), Budhaditya, Chandra-Mangal, Saraswati, Lakshmi, Adhi,
+      Sunapha, Anapha, Kemadruma (with cancellation), Kaalsarpa,
+      Vipreet Rajayoga, Raja Yoga, Dhana Yoga
+- [x] Each match injected into prompt with verbatim classical effect
+      so LLM cites them as fact, not interpretation
+- [x] Test chart (Jul 9 2003, Delhi) detected 6 yogas including the
+      Bhadra+Budhaditya+Raja Yoga combo in 10th — genuinely strong
+      career profile a Jyotishi would call out
 
-### Week 4
-- [ ] **Karaka chain** (`lib/karakas.js`)
-  - Atmakaraka, Amatyakaraka, Bhratrukaraka, Matrukaraka,
-    Putrakaraka, Gnatikaraka, Darakaraka (Parashari 7 karakas)
-  - Computed by sorting planets by longitude descending (degrees only,
-    ignore sign)
-  - Atmakaraka governs soul's lesson — huge signification
-  - Inject into prompt
+### Week 4 ✅ DONE
+- [x] **Karaka chain** (`lib/karakas.js`)
+- [x] Atmakaraka, Amatyakaraka, Bhratrukaraka, Matrukaraka,
+      Putrakaraka, Gnatikaraka, Darakaraka — Jaimini 7-karaka scheme
+- [x] Sorted by degree-in-sign (with Rahu reversal convention)
+- [x] Atmakaraka soul-lesson + Darakaraka spouse-nature descriptions
+      bundled (8 planets each) so LLM gets concrete fact, not
+      interpretation
+- [x] Injected into prompt
 
-### Week 5
-- [ ] **Shadbala** (`lib/shadbala.js`) — 6-fold planet strength
-  - Sthana Bala (positional)
-  - Dig Bala (directional)
-  - Kala Bala (temporal)
-  - Cheshta Bala (motional)
-  - Naisargika Bala (natural)
-  - Drik Bala (aspectual)
-  - Standard formulas in BPHS Ch.27
-  - Strength tells the LLM which planets actually have power to deliver
-    results in their dasha periods
+### Week 5 ✅ DONE (simplified — 3 of 6 components)
+- [x] **Shadbala** (`lib/shadbala.js`) covering Sthana + Dig +
+      Naisargika Bala
+- [x] Returns RELATIVE ranking 1-7 + 0-100 normalized strength so
+      LLM can confidently say "Sun is your strongest planet, Saturn
+      your weakest" — accurate even from partial implementation
+- [ ] Full Kala + Cheshta + Drik Bala — deferred to future iteration
+      (the simplified version still solves the "which planet has
+      capacity to deliver" question well enough for now)
 
 ### Week 6
 - [ ] **Transit calculator** (`lib/transits.js`)
@@ -335,7 +331,7 @@ These are NOT part of this roadmap:
 
 | Phase | Weeks | Status |
 |---|---|---|
-| Phase 1 — Calculation rigor | 1-6 | 33% — Ashtakavarga shipped, yogas next |
+| Phase 1 — Calculation rigor | 1-6 | 83% — W1-5 shipped, only W6 (Transits) left |
 | Phase 2 — Rule engine + first rules | 7-12 | Not started |
 | Phase 3 — Books + Lal Kitab | 13-16 | Not started |
 | Phase 4 — Validation | 17-20 | Not started |
