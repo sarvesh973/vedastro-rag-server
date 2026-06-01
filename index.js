@@ -265,6 +265,31 @@ async function rateLimit(auth, action, res) {
   }
 }
 
+// Roll back a previously-incremented rate-limit counter. Use this when
+// the endpoint that incremented later fails (LLM error, timeout, etc.) so
+// the user isn't charged a quota slot for a request we couldn't fulfil.
+// Bug context: with free chat = 1, a single LLM timeout would leave the
+// user permanently at 1/1 for the day and every "first" chat afterwards
+// would get an instant paywall.
+async function rollbackRateLimit(auth, action) {
+  if (!auth || auth.isAdmin) return;
+  if (!firestoreDb) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
+  try {
+    await firestoreDb.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      if (!doc.exists) return;
+      const data = doc.data();
+      const used = data[action] || 0;
+      if (used <= 0) return;
+      tx.set(ref, { ...data, [action]: used - 1 }, { merge: true });
+    });
+  } catch (e) {
+    console.error('[rollbackRateLimit] error:', e.message);
+  }
+}
+
 // =========================================
 // HOROSCOPE CACHE — server-side per (sign × period × date)
 // =========================================
@@ -2213,18 +2238,20 @@ app.post('/chat', async (req, res) => {
   const auth = await verifyAuth(req, res);
   if (!auth) return;
 
-  // 2. Rate limit per UID
-  if (!await rateLimit(auth, 'chat', res)) return;
-
   try {
     const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon } = req.body;
 
+    // Validate BEFORE rate-limiting so a malformed request doesn't burn
+    // the user's daily quota (especially painful at free chat = 1).
     if (!question || typeof question !== 'string') {
       return res.status(400).json({ error: 'question is required' });
     }
     if (question.length > MAX_QUESTION_LEN) {
       return res.status(400).json({ error: `Question too long (max ${MAX_QUESTION_LEN} chars)` });
     }
+
+    // Rate limit per UID (only after the request is known-valid)
+    if (!await rateLimit(auth, 'chat', res)) return;
 
     if (auth.isAdmin) {
       console.log(`[chat] Admin request from ${auth.email} — quota bypassed`);
@@ -2409,6 +2436,8 @@ app.post('/chat', async (req, res) => {
     });
   } catch (err) {
     console.error('Chat error:', err);
+    // Refund the quota slot — request never produced a usable reply.
+    await rollbackRateLimit(auth, 'chat');
     return res.status(500).json({ error: err.message });
   }
 });
