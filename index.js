@@ -181,6 +181,17 @@ async function rateLimit(auth, action, res) {
     });
 
     if (!result.allowed) {
+      // Diagnostic: log every 429 with the resolved plan + uid + email
+      // so we can tell at a glance whether the user being blocked is
+      // actually free (working as designed) or paid (a plan-lookup
+      // bug — see PR #19). Without this line, Render logs only show
+      // an anonymous "[POST] 429 .../chat" and we have no way to tell
+      // why a given user hit the wall.
+      console.warn(
+        `[rateLimit 429] uid=${auth.uid} email=${auth.email || '?'} ` +
+        `plan=${auth.plan} action=${action} ` +
+        `used=${result.used}/${result.limit}`,
+      );
       res.status(429).json({
         error: `Daily ${action} limit reached (${result.used}/${result.limit}). Upgrade your plan for more.`,
         used: result.used,
