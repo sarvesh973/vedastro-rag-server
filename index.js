@@ -204,10 +204,14 @@ async function rateLimit(auth, action, res) {
   const today = new Date().toISOString().slice(0, 10);
   const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
   try {
+    let observedUsedBefore = null;
+    let observedDocExisted = null;
     const result = await firestoreDb.runTransaction(async (tx) => {
       const doc = await tx.get(ref);
+      observedDocExisted = doc.exists;
       const data = doc.exists ? doc.data() : {};
       const used = data[action] || 0;
+      observedUsedBefore = used;
       if (used >= limit) return { allowed: false, used, limit };
       tx.set(ref, {
         ...data,
@@ -219,6 +223,20 @@ async function rateLimit(auth, action, res) {
       return { allowed: true, used: used + 1, limit };
     });
 
+    // Diagnostic: log every successful slot reservation. Pairs with the
+    // existing 429 log so we can trace the full lifecycle per user —
+    // when their counter went 0→1, 1→2, etc. Without this we can't
+    // tell whether a user has actually been making chat requests today
+    // or whether something else is incrementing their counter.
+    if (result.allowed) {
+      console.log(
+        `[rateLimit ok] uid=${auth.uid} email=${auth.email || '?'} ` +
+        `plan=${auth.plan} action=${action} ` +
+        `used=${result.used}/${result.limit} ` +
+        `(docExisted=${observedDocExisted} usedBefore=${observedUsedBefore})`,
+      );
+    }
+
     if (!result.allowed) {
       // Diagnostic: log every 429 with the resolved plan + uid + email
       // so we can tell at a glance whether the user being blocked is
@@ -229,7 +247,8 @@ async function rateLimit(auth, action, res) {
       console.warn(
         `[rateLimit 429] uid=${auth.uid} email=${auth.email || '?'} ` +
         `plan=${auth.plan} action=${action} ` +
-        `used=${result.used}/${result.limit}`,
+        `used=${result.used}/${result.limit} ` +
+        `(docExisted=${observedDocExisted} usedBefore=${observedUsedBefore})`,
       );
       res.status(429).json({
         error: `Daily ${action} limit reached (${result.used}/${result.limit}). Upgrade your plan for more.`,
