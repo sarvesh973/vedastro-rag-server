@@ -334,6 +334,20 @@ Sarvarth Chintamani / Lal Kitab PDFs.
 - [ ] **Index Sarvarth Chintamani** — timing-of-events specialist.
   Most predictive of all classical books for specific date windows.
 - [ ] **Timing rules** — "X event in Y dasha if Z transit" patterns.
+- [ ] **Nakshatra rule domain** (`lib/rules/nakshatra.js`) — flagged
+  in real-user feedback as a missing primary signal. Original Phase 2/3
+  plan treated nakshatras as decorative metadata (rendered in chart text,
+  available via KB retrieval) instead of as rule predicates. Classical
+  sources disagree: Saravali Ch.7-8, Phaladeepika nakshatra chapters,
+  and BPHS all treat nakshatra placement as a first-class signal.
+  Deliverables:
+    - 27 nakshatra-character rules (Ashwini → Revati, one per nakshatra),
+      keyed off `birthNakshatra` and Moon's nakshatra
+    - Planet-in-nakshatra rules for Moon, Sun, Lagna lord (highest-signal
+      placements per classical texts)
+    - Add to evaluator REGISTRY so topic mapper can route to it
+    - Inject matched nakshatra rules into chat prompt alongside the
+      existing domain rules
 
 ### Week 15
 - [ ] **Index Lal Kitab** — THE missing piece for Indian users
@@ -404,6 +418,21 @@ Sarvarth Chintamani / Lal Kitab PDFs.
       astrological signals in the chart at the event date."*
 - [ ] **App About-page wire-up** — pending the next AAB build.
 - [ ] **Public methodology page** at `/methodology` — to write.
+- [ ] **Answer-fidelity validator** — flagged in real-user feedback:
+  "chat model hallucinates, gave me wrong mahadasha." The current
+  validation suite measures rule-engine accuracy but never checks that
+  the LLM's prose actually cites the correct chart facts. A 100% strict
+  hit rate today does NOT guarantee the user sees the right dasha in
+  the reply — the LLM can still drift. Deliverables:
+    - Post-generation pass that scans the LLM answer for planet names
+      and dasha mentions
+    - Compare against `chartData.dasha.mahadasha / antardasha / pratyantar`
+      — flag any mismatch
+    - Hook into `/chat` to either auto-retry once with a stricter prompt
+      ("you wrote X dasha; the chart says Y") or reject and fall back
+    - Add a `fidelity` metric to the validation runner: re-run /chat for
+      each celebrity event and score % of replies whose cited dasha
+      matches the active dasha at the event date
 
 **End of Phase 4: rule engine has a measurable, falsifiable accuracy
 metric. Validation suite is admin-callable and re-runnable on every
@@ -416,6 +445,14 @@ rule change to spot regressions.**
 ### Week 21
 - [ ] Admin dashboard — aggregate accuracy stats across user predictions
 - [ ] "Explain this prediction" button — shows rule chain + verse chain
+- [ ] **Hard-block chat when birth time is missing** — flagged in real-user
+  feedback: when `profile.timeOfBirth` is empty the server can't compute
+  the chart, so dasha is unknown and the LLM hallucinates one. Today the
+  request still goes through and the user gets a confident wrong answer.
+  Either block the request with a "we need your birth time to give an
+  accurate reading" gate, or run in a degraded mode that explicitly tells
+  the LLM "no chart available — give general guidance only, do NOT cite
+  any planet, sign, house, or dasha by name."
 
 ### Week 22
 - [ ] App About screen rewrite — emphasize rule engine + validation
