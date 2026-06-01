@@ -151,6 +151,50 @@ const RATE_LIMITS = {
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0 },
 };
 
+/**
+ * Atomically refund a previously-reserved rate-limit slot. Used when
+ * the work the slot was reserved for failed (Gemini timeout, parse
+ * error, geocode fail, uncaught exception, etc.) — without this the
+ * user gets penalised on their daily quota for a problem on our end.
+ *
+ * Worst-case symptom without this refund: a free user's very first
+ * chat hits a transient Gemini hiccup; the rate-limit counter was
+ * already bumped to 1 BEFORE the Gemini call; their second attempt
+ * (which they perceive as their first real one) sees 1/1 and gets
+ * blocked with "Daily chat limit reached" — even though they never
+ * actually received an answer.
+ *
+ * No-op for admins / unconfigured firestore / missing doc / already-
+ * zero counter. Errors are swallowed (logged) — a refund failure
+ * must not propagate up and turn into a second user-visible error.
+ */
+async function refundRateLimit(auth, action) {
+  if (!auth || auth.isAdmin) return;
+  if (!firestoreDb) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
+  try {
+    await firestoreDb.runTransaction(async (tx) => {
+      const doc = await tx.get(ref);
+      if (!doc.exists) return;
+      const data = doc.data();
+      const used = data[action] || 0;
+      if (used <= 0) return;
+      tx.set(
+        ref,
+        {
+          ...data,
+          [action]: used - 1,
+          updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
+  } catch (e) {
+    console.warn('[refundRateLimit] error (swallowed):', e.message);
+  }
+}
+
 async function rateLimit(auth, action, res) {
   if (!auth || auth.isAdmin) return true;          // Admins skip
   if (!firestoreDb) return true;                    // Fail open if Firestore not configured
@@ -2144,9 +2188,13 @@ app.post('/chat', async (req, res) => {
   const auth = await verifyAuth(req, res);
   if (!auth) return;
 
-  // 2. Rate limit per UID
+  // 2. Rate limit per UID. Reserves a slot — refunded below on any
+  //    failure path so the user isn't charged a chat for a request
+  //    that we never managed to fulfil (Gemini timeout, parse error,
+  //    geocode fail, uncaught exception, etc.).
   if (!await rateLimit(auth, 'chat', res)) return;
 
+  let chatSucceeded = false;
   try {
     const { question, userProfile, chatHistory, birthDate, birthTime, place, lat, lon } = req.body;
 
@@ -2317,7 +2365,7 @@ app.post('/chat', async (req, res) => {
       console.log('Conv log error:', logErr.message);
     }
 
-    return res.json({
+    res.json({
       answer,
       summary,
       details,
@@ -2338,9 +2386,22 @@ app.post('/chat', async (req, res) => {
         classifyMs: parallelMs,
       },
     });
+    chatSucceeded = true;
   } catch (err) {
     console.error('Chat error:', err);
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  } finally {
+    // Refund the rate-limit slot reserved at the top if we did not
+    // actually deliver a successful answer. Covers Gemini timeouts,
+    // parse failures, geocode failures, validation 400s, and any
+    // uncaught exception. Without this a transient failure on
+    // someone's first chat of the day permanently consumes their
+    // daily quota with no answer to show for it — the exact symptom
+    // we were seeing with free users hitting "1/1" on what they
+    // believed was their first message.
+    if (!chatSucceeded) {
+      await refundRateLimit(auth, 'chat');
+    }
   }
 });
 
