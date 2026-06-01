@@ -1550,6 +1550,7 @@ CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
 - VARY your chart references per question type — do NOT anchor every answer on the current Mahadasha/Antardasha. Career questions should foreground the 10th lord and Dasamsa. Marriage should foreground the 7th lord and Navamsha. Health should foreground the 6th lord and ascendant. Property the 4th lord. Education the 4th + 5th lords. Children the 5th lord and Jupiter. Only mention current dasha when it is genuinely the strongest signal for that specific question.
+- DASHA FIDELITY — STRICT: when you DO mention the current dasha, you MUST use the exact planet names from "CURRENT DASHA PERIOD" above. Do NOT cite any planet as the current Mahadasha / Antardasha / Pratyantar unless it matches the chart facts above EXACTLY. If you are unsure, omit the dasha citation rather than guess. Fabricating a dasha is the single worst error you can make — users verify this against other astrologers and lose trust immediately.
 - If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
 - If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
 - Keep the total content (all summary + all explanations) under ~320 words.
@@ -2325,11 +2326,21 @@ app.post('/chat', async (req, res) => {
     // + LLM as natural-language presenter".
     let matchedRules = [];
     if (chartData) {
-      const { evaluateDomain, topicToDomain } = require('./lib/rules/evaluator');
+      const { evaluateDomain, evaluateNakshatra, topicToDomain } = require('./lib/rules/evaluator');
       const domain = topicToDomain(topics[0] || (llmClass && llmClass.topic));
       if (domain) {
         matchedRules = evaluateDomain(chartData, domain, { topN: 6 });
         console.log(`[chat] rule-engine domain=${domain} matched=${matchedRules.length}/20`);
+      }
+      // ALWAYS evaluate the nakshatra domain on top of whatever topic
+      // the user asked. Nakshatra rules describe intrinsic native
+      // character (janma nakshatra + key planet placements) and are
+      // relevant regardless of question — they give the LLM concrete
+      // archetypal anchors instead of pure house+lord reasoning.
+      const nakRules = evaluateNakshatra(chartData, { topN: 3, minIntensity: 6 });
+      if (nakRules.length > 0) {
+        matchedRules = matchedRules.concat(nakRules);
+        console.log(`[chat] nakshatra rules matched=${nakRules.length}`);
       }
     }
 
@@ -2399,6 +2410,28 @@ app.post('/chat', async (req, res) => {
     // 'answer' kept for backward-compat (older app builds read only this).
     const answer = summary.map(p => '• ' + p).join(String.fromCharCode(10));
 
+    // ANSWER-FIDELITY CHECK — does the LLM's prose actually cite the
+    // correct dasha? Real-user feedback flagged hallucinated dashas
+    // ("wrong mahadasha, cause it forget to fetch it") that the rule-
+    // engine validation suite couldn't catch because it only inspects
+    // rule firings, not LLM output. We log mismatches at WARN level and
+    // expose the report in _debug so admin chats surface it in the bubble.
+    let fidelity = null;
+    if (chartData) {
+      try {
+        const { checkAnswerFidelity, fidelityLogLine } = require('./lib/answer-fidelity');
+        fidelity = checkAnswerFidelity(
+          summary.join(' ') + ' ' + details.map(d => d.explanation).join(' '),
+          chartData,
+        );
+        const line = fidelityLogLine(fidelity);
+        if (fidelity.mismatch) console.warn(line);
+        else console.log(line);
+      } catch (e) {
+        console.warn('[fidelity] check failed:', e.message);
+      }
+    }
+
     const sources = relevant.slice(0, 5).map(c => ({
       book: c.book,
       chapter: c.chapter,
@@ -2432,6 +2465,7 @@ app.post('/chat', async (req, res) => {
         books: [...new Set(relevant.map(c => c.book))],
         chunks: relevant.map(c => `${c.book} Ch.${c.chapter}`),
         classifyMs: parallelMs,
+        fidelity,
       },
     });
   } catch (err) {
