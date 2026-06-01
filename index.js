@@ -111,12 +111,51 @@ async function verifyAuth(req, res, { allowAnonymous = false } = {}) {
     const decoded = await firebaseAdmin.auth().verifyIdToken(match[1]);
     const email = (decoded.email || '').toLowerCase();
 
-    // Look up user's plan from Firestore (used for rate-limit tier)
+    // Look up user's plan from Firestore (used for rate-limit tier).
+    //
+    // SOURCE-OF-TRUTH NOTE: there are two places plan can live in
+    // Firestore — and they go out of sync for users who paid before
+    // the FIREBASE_SERVICE_ACCOUNT_JSON env was set on Render (or
+    // whose webhook only updated one of the two docs):
+    //
+    //   1. users/{uid}/subscription/current  ← canonical, written
+    //      by the Razorpay webhook. Has state + plan + period info.
+    //   2. usage/{uid}.plan                  ← legacy, written by
+    //      the old usage-tracking path. Often stale or missing.
+    //
+    // We prefer the canonical subscription doc when its state shows
+    // the user still has access. usage/{uid}.plan is only consulted
+    // as a fallback. Without this, paying users get rate-limited as
+    // free (chat: 1/day) even while the admin dashboard correctly
+    // shows them as premium — exactly the "limit reached on first
+    // chat" bug users reported.
     let plan = 'free';
     try {
       if (firestoreDb) {
-        const usageDoc = await firestoreDb.doc(`usage/${decoded.uid}`).get();
-        if (usageDoc.exists && usageDoc.data().plan) plan = usageDoc.data().plan;
+        const [subDoc, usageDoc] = await Promise.all([
+          firestoreDb.doc(`users/${decoded.uid}/subscription/current`).get(),
+          firestoreDb.doc(`usage/${decoded.uid}`).get(),
+        ]);
+
+        // Canonical first — pick this plan if the subscription is
+        // still entitling the user to paid features. cancelledPending
+        // keeps access until period end, so it counts.
+        const activeStates = new Set([
+          'active', 'trialing', 'cancelledPending',
+        ]);
+        if (subDoc.exists) {
+          const sub = subDoc.data() || {};
+          if (sub.plan && activeStates.has(sub.state)) {
+            plan = sub.plan;
+          }
+        }
+
+        // Legacy fallback. Only consulted if the canonical doc didn't
+        // give us a paid plan — otherwise we'd let a stale usage entry
+        // downgrade a current subscriber.
+        if (plan === 'free' && usageDoc.exists && usageDoc.data().plan) {
+          plan = usageDoc.data().plan;
+        }
       }
     } catch (_) {}
 
