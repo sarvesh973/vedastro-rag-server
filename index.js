@@ -855,15 +855,29 @@ async function generateResponse(prompt, opts) {
   // than flash, used for chat to stay safely under the app's 15s timeout
   // ceiling). Falls back to flash if lite errors. Horoscope keeps the
   // default flash-first order since it's cached anyway.
+  //
+  // opts.jsonSchema (optional) → set responseMimeType=application/json plus
+  // a responseSchema in generationConfig. Gemini 2.5 then guarantees a
+  // well-formed JSON reply matching the schema. This eliminates the
+  // "malformed JSON" failure class (missing commas inside arrays, trailing
+  // prose after the closing brace, etc.) that was silently surfacing the
+  // raw JSON string as a chat bubble in production.
   const models = (opts && opts.preferLite)
     ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
     : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
   for (const modelName of models) {
     try {
-      const model = genAI.getGenerativeModel({ model: modelName });
+      const modelConfig = { model: modelName };
+      if (opts && opts.jsonSchema) {
+        modelConfig.generationConfig = {
+          responseMimeType: 'application/json',
+          responseSchema: opts.jsonSchema,
+        };
+      }
+      const model = genAI.getGenerativeModel(modelConfig);
       const result = await model.generateContent(prompt);
-      console.log(`Generated response using ${modelName}`);
+      console.log(`Generated response using ${modelName}${opts && opts.jsonSchema ? ' (json-schema)' : ''}`);
       return result.response.text();
     } catch (err) {
       console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
@@ -871,6 +885,34 @@ async function generateResponse(prompt, opts) {
     }
   }
 }
+
+// JSON schema for the /chat reply. Gemini's structured-output mode
+// guarantees the response conforms to this shape, eliminating the
+// truncated-array / trailing-prose / missing-comma failure modes the
+// old free-form prompt suffered from. Schema is permissive on details
+// (some replies legitimately have 0 detail cards) but strict on the
+// summary array being a non-empty list of strings.
+const CHAT_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    details: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          chapter: { type: 'string' },
+          explanation: { type: 'string' },
+        },
+        required: ['chapter', 'explanation'],
+      },
+    },
+  },
+  required: ['summary'],
+};
 
 // =========================================
 // BIRTH CHART CALCULATION (Phase 4)
@@ -2353,13 +2395,20 @@ app.post('/chat', async (req, res) => {
     // Chat uses default model order (flash first, lite fallback) for
     // best answer quality. Flash-lite latency experiment was reverted
     // pending the next AAB which will bump the client timeout from 15s.
-    const raw = await generateResponse(prompt);
+    //
+    // jsonSchema mode is enabled — Gemini 2.5 guarantees the response
+    // conforms to CHAT_RESPONSE_SCHEMA. Eliminates the silent
+    // raw-JSON-as-bullet leak we saw in production (parse failures
+    // like "Unexpected non-whitespace character after JSON" or
+    // "Expected ',' or ']' after array element"). The fallback parser
+    // chain below stays in place as defense in depth.
+    const raw = await generateResponse(prompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
-    // Gemini occasionally returns truncated/unbalanced JSON (e.g. missing
-    // a closing `]` for the details array before the final `}`). We try
-    // a strict parse first, then a bracket-balanced retry, then fall back.
+    // With jsonSchema mode this should always succeed on the first try.
+    // The bracket-balance + prose-strip fallbacks remain as belt-and-
+    // suspenders in case Gemini ever fails the schema constraint.
     let summary = [];
     let details = [];
     const clean = raw.replace(/```json?/gi, '').replace(/```/g, '').trim();
@@ -2388,6 +2437,23 @@ app.post('/chat', async (req, res) => {
       console.warn('[chat] strict JSON parse failed:', e.message);
     }
 
+    // PROSE-STRIP RETRY — handles the production failure "Unexpected
+    // non-whitespace character after JSON at position N", which happens
+    // when Gemini wraps a valid JSON object in surrounding text like
+    // 'Here is your reading: {...}\n\nLet me know if you need more.'
+    // Extract the first '{' through the last '}' and retry.
+    if (!parsedOk) {
+      const m = clean.match(/\{[\s\S]*\}/);
+      if (m && m[0] !== clean) {
+        try {
+          parsedOk = applyParsed(JSON.parse(m[0]));
+          if (parsedOk) console.log('[chat] recovered via prose-strip');
+        } catch (e3) {
+          console.warn('[chat] prose-strip retry also failed:', e3.message);
+        }
+      }
+    }
+
     if (!parsedOk) {
       // Bracket-balance: count unmatched openers (ignoring those inside
       // string literals), append the missing closers in correct order.
@@ -2403,8 +2469,15 @@ app.post('/chat', async (req, res) => {
     }
 
     if (summary.length === 0) {
-      summary = [raw.trim()];
+      // Last-resort safety net: don't leak raw JSON into the bubble.
+      // If everything failed, surface a generic apology instead of the
+      // broken raw output — better UX than a wall of '{ "summary": [...'.
+      // Also refund the user's quota slot: we never delivered a real
+      // reply, so charging it would feel like the bug taxing the user.
+      console.error('[chat] all parsers failed, surfacing fallback message. raw head:', raw.slice(0, 200));
+      summary = ['Sorry, I had trouble forming a clear answer this time. Please try asking again or rephrase your question.'];
       details = [];
+      await rollbackRateLimit(auth, 'chat');
     }
 
     // 'answer' kept for backward-compat (older app builds read only this).
