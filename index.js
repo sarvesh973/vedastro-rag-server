@@ -183,12 +183,40 @@ async function verifyAuth(req, res, { allowAnonymous = false } = {}) {
 // but server allows 5 → user sends 4 more, then sees "5/5 limit
 // reached" message that doesn't match what we promised.
 const RATE_LIMITS = {
-  free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20 },
-  trial:       { chat: 10,  palm: 2,  horoscope: 60,  chart: 60,  search: 100 },
-  standard:    { chat: 30,  palm: 5,  horoscope: 100, chart: 100, search: 200 },
-  premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500 },
-  anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0 },
+  // `insight` is the kundli-screen auto-readings (D1 main + D9 Navamsha
+  // + D10 Dasamsa). Real-user feedback: opening the chart screen to
+  // check planet placements burned the user's 1 free chat quota for the
+  // day, because the screen auto-fires /chat to generate the readings.
+  // Separated into its own quota so users can BROWSE their chart freely
+  // without losing their ability to actually chat.
+  free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5 },
+  trial:       { chat: 10,  palm: 2,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
+  standard:    { chat: 30,  palm: 5,  horoscope: 100, chart: 100, search: 200, insight: 60 },
+  premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500, insight: 200 },
+  anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0,   insight: 0 },
 };
+
+// Kundli-screen auto-readings have distinctive prompt openings. Recognising
+// them on the server lets us route to the `insight` quota without needing
+// an app update — current AABs benefit immediately.
+//
+// Distinguishing kundli-insight from a real user question:
+//   - D1 main reading:  "From my birth chart, give me a personalized Vedic reading covering personality..."
+//   - D9 Navamsha:      "Give me a Navamsha (D9) reading focused on..."
+//   - D10 Dasamsa:      "Give me a Dasamsa (D10) reading focused on..."
+// These are bot prompts the app sends; they don't match real user phrasing.
+const INSIGHT_PROMPT_FINGERPRINTS = [
+  /^\s*From my birth chart,\s*give me a personalized Vedic reading covering personality/i,
+  /^\s*Give me a Navamsha\s*\(D9\)\s*reading/i,
+  // D10 prompt is "Give me a Dasamsa (D10) career reading focused on..."
+  // — note "career" sits between (D10) and "reading".
+  /^\s*Give me a Dasamsa\s*\(D10\)\s+\w+\s+reading/i,
+];
+
+function isKundliInsightPrompt(question) {
+  if (!question || typeof question !== 'string') return false;
+  return INSIGHT_PROMPT_FINGERPRINTS.some(re => re.test(question));
+}
 
 async function rateLimit(auth, action, res) {
   if (!auth || auth.isAdmin) return true;          // Admins skip
@@ -2293,8 +2321,17 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: `Question too long (max ${MAX_QUESTION_LEN} chars)` });
     }
 
-    // Rate limit per UID (only after the request is known-valid)
-    if (!await rateLimit(auth, 'chat', res)) return;
+    // Rate limit per UID (only after the request is known-valid).
+    // Kundli-screen auto-readings (D1 main / D9 Navamsha / D10 Dasamsa)
+    // are routed to the `insight` quota — these are bot-fired prompts
+    // when the user opens the chart screen, NOT real chat questions.
+    // Previously they burned the user's 1 free chat for the day on first
+    // chart view; now they have their own 5/day free budget.
+    const rateAction = isKundliInsightPrompt(question) ? 'insight' : 'chat';
+    if (rateAction === 'insight') {
+      console.log(`[chat] routing kundli-insight prompt to 'insight' quota for uid=${auth.uid}`);
+    }
+    if (!await rateLimit(auth, rateAction, res)) return;
 
     if (auth.isAdmin) {
       console.log(`[chat] Admin request from ${auth.email} — quota bypassed`);
@@ -2477,7 +2514,7 @@ app.post('/chat', async (req, res) => {
       console.error('[chat] all parsers failed, surfacing fallback message. raw head:', raw.slice(0, 200));
       summary = ['Sorry, I had trouble forming a clear answer this time. Please try asking again or rephrase your question.'];
       details = [];
-      await rollbackRateLimit(auth, 'chat');
+      await rollbackRateLimit(auth, rateAction);
     }
 
     // ANSWER-FIDELITY CHECK — does the LLM's prose actually cite the
@@ -2591,7 +2628,11 @@ app.post('/chat', async (req, res) => {
   } catch (err) {
     console.error('Chat error:', err);
     // Refund the quota slot — request never produced a usable reply.
-    await rollbackRateLimit(auth, 'chat');
+    // Use the action we actually charged earlier (chat or insight).
+    try {
+      const action = isKundliInsightPrompt(req.body && req.body.question) ? 'insight' : 'chat';
+      await rollbackRateLimit(auth, action);
+    } catch (_) {}
     return res.status(500).json({ error: err.message });
   }
 });
