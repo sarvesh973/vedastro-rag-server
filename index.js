@@ -2480,30 +2480,76 @@ app.post('/chat', async (req, res) => {
       await rollbackRateLimit(auth, 'chat');
     }
 
-    // 'answer' kept for backward-compat (older app builds read only this).
-    const answer = summary.map(p => '• ' + p).join(String.fromCharCode(10));
-
     // ANSWER-FIDELITY CHECK — does the LLM's prose actually cite the
-    // correct dasha? Real-user feedback flagged hallucinated dashas
-    // ("wrong mahadasha, cause it forget to fetch it") that the rule-
-    // engine validation suite couldn't catch because it only inspects
-    // rule firings, not LLM output. We log mismatches at WARN level and
-    // expose the report in _debug so admin chats surface it in the bubble.
+    // correct dasha, planet-houses, planet-signs, and yogas? Real-user
+    // feedback flagged hallucinated dashas ("wrong mahadasha, cause it
+    // forget to fetch it") that the rule-engine validation suite
+    // couldn't catch because it only inspects rule firings, not LLM
+    // output. We now check all four categories and AUTO-RETRY on
+    // mismatch with a correction prompt that names the specific errors.
     let fidelity = null;
+    let fidelityRetried = false;
     if (chartData) {
       try {
-        const { checkAnswerFidelity, fidelityLogLine } = require('./lib/answer-fidelity');
-        fidelity = checkAnswerFidelity(
-          summary.join(' ') + ' ' + details.map(d => d.explanation).join(' '),
-          chartData,
-        );
-        const line = fidelityLogLine(fidelity);
-        if (fidelity.mismatch) console.warn(line);
-        else console.log(line);
+        const { checkAnswerFidelity, fidelityLogLine, buildCorrectionPrompt } = require('./lib/answer-fidelity');
+        const fullText = () => summary.join(' ') + ' ' + details.map(d => d.explanation).join(' ');
+        fidelity = checkAnswerFidelity(fullText(), chartData);
+        console[fidelity.mismatch ? 'warn' : 'log'](fidelityLogLine(fidelity));
+
+        // AUTO-RETRY: if the answer contained hallucinated facts, ask
+        // Gemini once more with a correction prompt that names the
+        // specific errors. Cost: ~5-10s extra latency on mismatch only
+        // (typical mismatch rate from production WARN logs will tell us
+        // if this is sustainable; if it fires <5% of chats, fine).
+        if (fidelity.mismatch) {
+          const correction = buildCorrectionPrompt(fidelity);
+          const retryPrompt = prompt + '\n\n' + correction;
+          console.log('[fidelity] retrying with correction prompt');
+          try {
+            const rawRetry = await generateResponse(retryPrompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
+            const cleanRetry = rawRetry.replace(/```json?/gi, '').replace(/```/g, '').trim();
+            const oldSummary = summary.slice();
+            const oldDetails = details.slice();
+            summary = [];
+            details = [];
+            let retryOk = false;
+            try { retryOk = applyParsed(JSON.parse(cleanRetry)); } catch (_) {}
+            if (!retryOk) {
+              const mm = cleanRetry.match(/\{[\s\S]*\}/);
+              if (mm) { try { retryOk = applyParsed(JSON.parse(mm[0])); } catch (_) {} }
+            }
+            if (retryOk && summary.length > 0) {
+              // Re-check fidelity on the retry. If it's now clean, use it.
+              // If it still mismatches, keep the retry anyway (it's our
+              // best second-shot attempt), but log the residual issue.
+              const fidelity2 = checkAnswerFidelity(fullText(), chartData);
+              if (!fidelity2.mismatch) {
+                console.log('[fidelity] retry SUCCESS — corrected answer');
+              } else {
+                console.warn('[fidelity] retry still mismatched: ' + fidelityLogLine(fidelity2));
+              }
+              fidelity = fidelity2;
+              fidelityRetried = true;
+            } else {
+              // Retry parse failed — revert to original (still wrong but
+              // at least renderable) summary/details.
+              summary = oldSummary;
+              details = oldDetails;
+              console.warn('[fidelity] retry parse failed, keeping original answer');
+            }
+          } catch (retryErr) {
+            console.warn('[fidelity] retry call failed:', retryErr.message);
+          }
+        }
       } catch (e) {
         console.warn('[fidelity] check failed:', e.message);
       }
     }
+
+    // 'answer' kept for backward-compat (older app builds read only this).
+    // IMPORTANT: build this AFTER the fidelity retry so a successful
+    // correction replaces the wrong bullets, not appends to them.
+    const answer = summary.map(p => '• ' + p).join(String.fromCharCode(10));
 
     const sources = relevant.slice(0, 5).map(c => ({
       book: c.book,
@@ -2539,6 +2585,7 @@ app.post('/chat', async (req, res) => {
         chunks: relevant.map(c => `${c.book} Ch.${c.chapter}`),
         classifyMs: parallelMs,
         fidelity,
+        fidelityRetried,
       },
     });
   } catch (err) {
