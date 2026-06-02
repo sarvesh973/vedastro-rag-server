@@ -984,13 +984,23 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     if (dateStr.includes('/')) {
       const parts = dateStr.split('/');
       if (parts[2].length === 4) {
-        // DD/MM/YYYY or MM/DD/YYYY
+        // The app's UserProfile.dobFormatted sends DD/MM/YYYY, so
+        // parts[0]=day, parts[1]=month by default.
         day = parseInt(parts[0]);
         month = parseInt(parts[1]);
         year = parseInt(parts[2]);
-        // If day > 12, it's DD/MM/YYYY format
-        if (day > 12) {
-          [day, month] = [month, day]; // swap to get correct values
+        // Swap ONLY if the SECOND field is > 12 — that can only be a day,
+        // meaning the input was actually MM/DD/YYYY (American). Never swap
+        // based on the first field: a first field > 12 in DD/MM (e.g.
+        // 16/09 = 16 Sept) is a perfectly valid day and must NOT move.
+        //
+        // PREVIOUS BUG: this swapped when day>12, which corrupted EVERY
+        // DD/MM date after the 12th of a month (16/09 -> month 16),
+        // making calculateChart return null. Result: every user born on
+        // the 13th-31st got no chart, no dasha, and "I cannot calculate
+        // your dasha" replies. This was ~60% of users.
+        if (month > 12 && day <= 12) {
+          [day, month] = [month, day];
         }
       } else {
         year = parseInt(parts[0]);
