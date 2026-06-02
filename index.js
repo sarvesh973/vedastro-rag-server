@@ -894,18 +894,29 @@ async function generateResponse(prompt, opts) {
     ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
     : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
+  // Temperature: LOW by default. This is a citation-grounded task
+  // (rephrase deterministic chart facts + cited verses), NOT creative
+  // writing. The SDK default (~1.0) encourages the model to drift from
+  // the supplied facts — exactly what produced the "Venus mahadasha
+  // reported as Jupiter" hallucination. Callers can override (horoscope
+  // passes a higher value for a little day-to-day variety).
+  const temperature = (opts && typeof opts.temperature === 'number')
+    ? opts.temperature
+    : 0.15;
+
   for (const modelName of models) {
     try {
-      const modelConfig = { model: modelName };
+      const modelConfig = {
+        model: modelName,
+        generationConfig: { temperature },
+      };
       if (opts && opts.jsonSchema) {
-        modelConfig.generationConfig = {
-          responseMimeType: 'application/json',
-          responseSchema: opts.jsonSchema,
-        };
+        modelConfig.generationConfig.responseMimeType = 'application/json';
+        modelConfig.generationConfig.responseSchema = opts.jsonSchema;
       }
       const model = genAI.getGenerativeModel(modelConfig);
       const result = await model.generateContent(prompt);
-      console.log(`Generated response using ${modelName}${opts && opts.jsonSchema ? ' (json-schema)' : ''}`);
+      console.log(`Generated response using ${modelName} (temp=${temperature}${opts && opts.jsonSchema ? ', json-schema' : ''})`);
       return result.response.text();
     } catch (err) {
       console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
@@ -1524,10 +1535,15 @@ function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, cha
   const tone = classifier && classifier.tone ? classifier.tone : 'neutral';
   const topic = classifier && classifier.topic ? classifier.topic : 'general';
   const focusBlock = focus
-    ? `QUESTION-SPECIFIC FOCUS (REQUIRED — anchor your reasoning here, do NOT default to current dasha for every answer):
+    ? `QUESTION-SPECIFIC FOCUS — anchor your reasoning on the chart factor(s) below:
 ${focus}
 Tone for THIS reply: ${tone}.
 Sub-topic: ${topic}.
+EXCEPTION: if the user's question is itself about their dasha / mahadasha /
+antardasha / current planetary period / "kaal", IGNORE the focus above and
+answer directly from the CURRENT DASHA PERIOD block in the chart — naming the
+EXACT mahadasha and antardasha planets written there. Never substitute a
+different planet.
 `
     : '';
 
@@ -1619,7 +1635,8 @@ RULES FOR THE JSON:
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
-- VARY your chart references per question type — do NOT anchor every answer on the current Mahadasha/Antardasha. Career questions should foreground the 10th lord and Dasamsa. Marriage should foreground the 7th lord and Navamsha. Health should foreground the 6th lord and ascendant. Property the 4th lord. Education the 4th + 5th lords. Children the 5th lord and Jupiter. Only mention current dasha when it is genuinely the strongest signal for that specific question.
+- CHART REFERENCES BY QUESTION TYPE (interpretation guidance — this does NOT permit altering any chart fact): foreground the house/lord most relevant to the question — career → 10th lord + Dasamsa (D10); marriage → 7th lord + Navamsha (D9); health → 6th lord + ascendant; property → 4th lord; education → 4th + 5th lords; children → 5th lord + Jupiter. BUT when the question is ABOUT the dasha / current period itself, the dasha IS the answer — state it exactly from the CURRENT DASHA PERIOD block.
+- HOUSE & SIGN FIDELITY — STRICT: a planet's house number, sign, and nakshatra are EXACTLY as written in the PLANETARY POSITIONS block. If it says "Jupiter ... House 4", it is the 4th house — never the 5th. Never recount, shift, or guess a house/sign. You may interpret what a placement means; you may not change the placement.
 - DASHA FIDELITY — STRICT: the CURRENT DASHA PERIOD section above contains the chart's actual active Mahadasha, Antardasha, and Pratyantar. Treat these as ground truth. TWO equally bad failures, never do either:
   (a) FABRICATION — naming any planet as the current Mahadasha / Antardasha / Pratyantar that does NOT match the names above. This is the worst credibility error — users cross-check against other apps and notice instantly.
   (b) REFUSAL — saying "I do not know your current dasha" or "this needs to be calculated from your nakshatra" when the answer is literally written in the CURRENT DASHA PERIOD block above. If the user asks "what is my mahadasha?" and the block says "Mahadasha: Venus", you MUST answer "Aapki vartaman Mahadasha Venus hai" — do not hedge, do not punt to "consult an astrologer", do not lecture about how dasha is calculated. Answer with the planet names from the block.
@@ -1668,7 +1685,18 @@ ${focusBlock}
 ${rulesBlock}
 ${historyContext}
 
-REFERENCE VERSES (use these for accuracy — DO NOT cite them by name in your reply):
+REFERENCE VERSES — RAG GROUNDING (STRICT):
+These are the ONLY classical sources you may cite. Rules:
+- Every classical claim in your "details" reasoning must be supported by
+  one of the verses below. Ground your explanation in what these verses
+  actually say about the user's specific placements.
+- In details[].chapter, name ONLY a book + chapter that appears in the
+  list below. NEVER cite a book, chapter, or verse number that is not
+  present here — fabricating a citation is a serious error.
+- If a point you want to make is NOT supported by any verse below, either
+  omit it or state it plainly as general principle WITHOUT a fake citation.
+- Do NOT paste verse text verbatim into the body; explain it in plain
+  ${(language || '').toLowerCase().startsWith('en') ? 'English' : 'Hinglish'}, applied to THIS user's chart.
 ${versesContext}
 
 USER'S LATEST MESSAGE: ${question}
