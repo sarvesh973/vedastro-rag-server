@@ -1645,12 +1645,12 @@ RULES FOR THE JSON:
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
-- CHART REFERENCES BY QUESTION TYPE (interpretation guidance — this does NOT permit altering any chart fact): foreground the house/lord most relevant to the question — career → 10th lord + Dasamsa (D10); marriage → 7th lord + Navamsha (D9); health → 6th lord + ascendant; property → 4th lord; education → 4th + 5th lords; children → 5th lord + Jupiter. BUT when the question is ABOUT the dasha / current period itself, the dasha IS the answer — state it exactly from the CURRENT DASHA PERIOD block.
+- LEAD WITH THE QUESTION'S OWN HOUSE/LORD — do NOT turn every answer into a dasha reading. This is an interpretation rule, it does NOT permit altering any chart fact. Foreground the house/lord most relevant to the question and build the answer around it: career → 10th lord + Dasamsa (D10); marriage → 7th lord + Navamsha (D9); health → 6th lord + ascendant; property → 4th lord; education → 4th + 5th lords; children → 5th lord + Jupiter; wealth → 2nd + 11th lords; family → relevant bhava + karaka. Mention the current Mahadasha/Antardasha ONLY when (a) the question is itself about dasha/timing/"when will X happen", OR (b) the running dasha lord is genuinely the strongest signal for THIS specific question. For a normal topic question, one sentence connecting it to the dasha is the maximum — the bulk of the answer must come from the question's own house, lord, and relevant divisional chart. An answer that leads every topic with "you are in X mahadasha" is WRONG even if the dasha is correct.
 - HOUSE & SIGN FIDELITY — STRICT: a planet's house number, sign, and nakshatra are EXACTLY as written in the PLANETARY POSITIONS block. If it says "Jupiter ... House 4", it is the 4th house — never the 5th. Never recount, shift, or guess a house/sign. You may interpret what a placement means; you may not change the placement.
-- DASHA FIDELITY — STRICT: the CURRENT DASHA PERIOD section above contains the chart's actual active Mahadasha, Antardasha, and Pratyantar. Treat these as ground truth. TWO equally bad failures, never do either:
-  (a) FABRICATION — naming any planet as the current Mahadasha / Antardasha / Pratyantar that does NOT match the names above. This is the worst credibility error — users cross-check against other apps and notice instantly.
-  (b) REFUSAL — saying "I do not know your current dasha" or "this needs to be calculated from your nakshatra" when the answer is literally written in the CURRENT DASHA PERIOD block above. If the user asks "what is my mahadasha?" and the block says "Mahadasha: Venus", you MUST answer "Aapki vartaman Mahadasha Venus hai" — do not hedge, do not punt to "consult an astrologer", do not lecture about how dasha is calculated. Answer with the planet names from the block.
-  The only time it is OK to hedge is if CURRENT DASHA PERIOD is genuinely absent from the chart context above (which means the user has no birth-time on file). Then you may say "exact dasha needs your birth time".
+- DASHA ACCURACY — WHEN YOU DO mention the dasha, it must be correct (this rule is about correctness, NOT about how often to bring it up — see the LEAD WITH THE QUESTION'S OWN HOUSE/LORD rule above for when to mention it). The CURRENT DASHA PERIOD section contains the chart's actual active Mahadasha, Antardasha, and Pratyantar. Two failures to avoid whenever the dasha comes up:
+  (a) FABRICATION — never name a planet as the current Mahadasha / Antardasha / Pratyantar that does NOT match the names in that block. State the dasha exactly as written, never a substitute planet.
+  (b) REFUSAL — if the user directly asks "what is my mahadasha?" and the block says "Mahadasha: Venus", answer plainly "Aapki vartaman Mahadasha Venus hai". Do not punt to "consult an astrologer" or lecture on how dasha is calculated when the answer is right there in the block.
+  The only time it is OK to hedge is if CURRENT DASHA PERIOD is genuinely absent from the chart context above (the user has no birth-time on file). Then you may say "exact dasha needs your birth time".
 - If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
 - If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
 - Keep the total content (all summary + all explanations) under ~320 words.
@@ -2480,7 +2480,12 @@ app.post('/chat', async (req, res) => {
     // like "Unexpected non-whitespace character after JSON" or
     // "Expected ',' or ']' after array element"). The fallback parser
     // chain below stays in place as defense in depth.
-    const raw = await generateResponse(prompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
+    // temp 0.35: low enough to stay faithful to the chart facts, high
+    // enough to let the model vary which house/lord it foregrounds by
+    // question type. At 0.15 the model rigidly latched onto the single
+    // most-emphasized instruction (the dasha block) and answered every
+    // question — career, marriage, health — as a dasha reading.
+    const raw = await generateResponse(prompt, { jsonSchema: CHAT_RESPONSE_SCHEMA, temperature: 0.35 });
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
@@ -2584,7 +2589,9 @@ app.post('/chat', async (req, res) => {
           const retryPrompt = prompt + '\n\n' + correction;
           console.log('[fidelity] retrying with correction prompt');
           try {
-            const rawRetry = await generateResponse(retryPrompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
+            // Lower temp on the correction retry — we want it to comply
+            // precisely with the named fact fixes, not get creative.
+            const rawRetry = await generateResponse(retryPrompt, { jsonSchema: CHAT_RESPONSE_SCHEMA, temperature: 0.2 });
             const cleanRetry = rawRetry.replace(/```json?/gi, '').replace(/```/g, '').trim();
             const oldSummary = summary.slice();
             const oldDetails = details.slice();
