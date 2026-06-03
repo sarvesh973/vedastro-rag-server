@@ -1891,15 +1891,63 @@ Return ONLY valid JSON, no markdown.`;
 // browser_fallback_url so it gracefully degrades to the web listing on
 // desktop / iOS / any device without the Play Store app.
 //
-// Put THIS url in the Instagram bio:  https://<host>/get
+// Put THIS url in the bio. Add ?src=<channel> per platform to attribute
+// taps + installs:  /get?src=instagram , /get?src=youtube , /get?src=whatsapp
 const PLAY_PACKAGE = 'com.mokshastro.ai';
-const PLAY_WEB_URL = `https://play.google.com/store/apps/details?id=${PLAY_PACKAGE}`;
-const PLAY_INTENT_URL =
-  `intent://details?id=${PLAY_PACKAGE}#Intent;scheme=market;` +
-  `package=com.android.vending;` +
-  `S.browser_fallback_url=${encodeURIComponent(PLAY_WEB_URL)};end`;
+
+// Sanitize a caller-supplied source tag to a safe short token.
+function sanitizeSrc(s) {
+  const t = String(s || 'direct').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 24);
+  return t || 'direct';
+}
+
+// Play Store install-referrer string. Google Play captures this and
+// surfaces it in Play Console → Acquisition reports (UTM), so you can
+// see INSTALLS (not just taps) per source — the metric that matters.
+function playReferrer(src) {
+  return `utm_source=${src}&utm_medium=bio&utm_campaign=social`;
+}
+function playWebUrl(src) {
+  return `https://play.google.com/store/apps/details?id=${PLAY_PACKAGE}` +
+    `&referrer=${encodeURIComponent(playReferrer(src))}`;
+}
+function playIntentUrl(src) {
+  return `intent://details?id=${PLAY_PACKAGE}` +
+    `&referrer=${encodeURIComponent(playReferrer(src))}` +
+    `#Intent;scheme=market;package=com.android.vending;` +
+    `S.browser_fallback_url=${encodeURIComponent(playWebUrl(src))};end`;
+}
+
+// Best-effort tap counter. One atomic write per click to a per-day doc;
+// no reads, non-blocking, failures swallowed. Gives daily totals broken
+// down by platform and source — viewable in Firestore console at
+// link_stats/{YYYY-MM-DD}.
+function logLinkClick(src, platform) {
+  if (!firestoreDb) return;
+  const day = new Date().toISOString().slice(0, 10);
+  const inc = firebaseAdmin.firestore.FieldValue.increment(1);
+  firestoreDb.doc(`link_stats/${day}`).set({
+    total: inc,
+    [`platform_${platform}`]: inc,
+    [`src_${src}`]: inc,
+    updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true }).catch((e) => console.warn('[get] click log failed:', e.message));
+}
 
 app.get('/get', (req, res) => {
+  const src = sanitizeSrc(req.query.src);
+  const ua = req.get('user-agent') || '';
+  const platform = /android/i.test(ua)
+    ? 'android'
+    : (/iphone|ipad|ipod/i.test(ua) ? 'ios' : 'other');
+
+  // Fire-and-forget tap log; never blocks the redirect.
+  logLinkClick(src, platform);
+  console.log(`[get] tap src=${src} platform=${platform}`);
+
+  const webUrl = playWebUrl(src);
+  const intentUrl = playIntentUrl(src);
+
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.send(`<!DOCTYPE html>
@@ -1922,14 +1970,14 @@ app.get('/get', (req, res) => {
     <div class="dot"></div>
     <h2>Opening Moksha on Google Play…</h2>
     <p>If it doesn't open automatically,
-       <a id="fallback" href="${PLAY_WEB_URL}">tap here</a>.</p>
+       <a id="fallback" href="${webUrl}">tap here</a>.</p>
   </div>
 <script>
 (function () {
   var ua = navigator.userAgent || '';
   var isAndroid = /Android/i.test(ua);
-  var web = ${JSON.stringify(PLAY_WEB_URL)};
-  var intent = ${JSON.stringify(PLAY_INTENT_URL)};
+  var web = ${JSON.stringify(webUrl)};
+  var intent = ${JSON.stringify(intentUrl)};
   if (isAndroid) {
     // Fire the Play Store app intent. browser_fallback_url inside the
     // intent handles the case where the Play app can't take it.
