@@ -3474,10 +3474,16 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       rows.push({
         uid,
         plan: d.plan || d.planId || null,
-        status: d.status || 'unknown',
+        // The webhook writes the canonical lifecycle field `state`
+        // (trialing/active/cancelledPending/expired). Older docs may
+        // have `status`. Prefer state, fall back to status.
+        status: d.state || d.status || 'unknown',
         razorpaySubscriptionId: d.razorpaySubscriptionId || null,
         trialEndsAt: toIso(d.trialEndsAt),
         currentPeriodEndsAt: toIso(d.currentPeriodEndsAt),
+        // When they subscribed: activatedAt (written on
+        // subscription.authenticated/activated), falling back to createdAt.
+        subscribedAt: toIso(d.activatedAt) || toIso(d.createdAt),
         cancelledAt: toIso(d.cancelledAt),
         updatedAt: toIso(d.updatedAt),
         createdAt: toIso(d.createdAt),
@@ -3498,17 +3504,18 @@ app.get('/admin/api/subscriptions', async (req, res) => {
     }
     for (const r of rows) r.email = emailMap[r.uid] || null;
 
-    // Order: active first, then by most recent activity desc.
+    // Order: most recently subscribed first (newest sign-ups on top).
     rows.sort((a, b) => {
-      const sa = a.status === 'active' ? 0 : 1;
-      const sb = b.status === 'active' ? 0 : 1;
-      if (sa !== sb) return sa - sb;
-      const ta = a.cancelledAt || a.updatedAt || a.currentPeriodEndsAt || '';
-      const tb = b.cancelledAt || b.updatedAt || b.currentPeriodEndsAt || '';
+      const ta = a.subscribedAt || a.updatedAt || '';
+      const tb = b.subscribedAt || b.updatedAt || '';
       return tb.localeCompare(ta);
     });
 
-    const summary = { total: rows.length, active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, trialing: 0, other: 0 };
+    const summary = {
+      total: rows.length,
+      active: 0, trialing: 0, cancelledPending: 0, expired: 0,
+      paused: 0, halted: 0, paymentFailed: 0, other: 0,
+    };
     for (const r of rows) {
       if (summary[r.status] !== undefined) summary[r.status]++;
       else summary.other++;

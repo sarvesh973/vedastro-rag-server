@@ -377,16 +377,17 @@
         <!-- ── SUBSCRIPTIONS ── -->
         <section x-show="tab === 'subs'">
           <div x-show="subsSummary" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
-            <template x-for="key in ['total','active','trialing','cancelled','expired','paused','halted']" :key="key">
+            <template x-for="key in ['total','active','trialing','cancelledPending','expired','paused','paymentFailed']" :key="key">
               <button @click="subsFilter = (key === 'total' ? 'all' : key)"
                 :class="(subsFilter === key || (key === 'total' && subsFilter === 'all'))
                           ? 'border-purple-500 bg-slate-800'
                           : 'border-slate-800 bg-slate-900 hover:border-slate-700'"
                 class="p-3 rounded-lg border text-left transition">
-                <div class="text-xs text-slate-500 uppercase tracking-wide" x-text="key"></div>
+                <div class="text-xs text-slate-500 uppercase tracking-wide"
+                  x-text="key === 'cancelledPending' ? 'cancelled' : (key === 'paymentFailed' ? 'pmt failed' : key)"></div>
                 <div class="text-xl font-bold"
                   :class="key === 'active' || key === 'trialing' ? 'text-emerald-400'
-                        : key === 'cancelled' || key === 'expired' || key === 'halted' ? 'text-rose-400'
+                        : key === 'cancelledPending' || key === 'expired' || key === 'paymentFailed' ? 'text-rose-400'
                         : key === 'paused' ? 'text-amber-300'
                         : 'text-purple-300'"
                   x-text="(subsSummary && subsSummary[key]) ?? 0"></div>
@@ -411,6 +412,7 @@
                   <th class="px-3 py-2 text-left">User</th>
                   <th class="px-3 py-2 text-left">Plan</th>
                   <th class="px-3 py-2 text-left">Status</th>
+                  <th class="px-3 py-2 text-left">Subscribed</th>
                   <th class="px-3 py-2 text-left">Period ends</th>
                   <th class="px-3 py-2 text-left">Cancelled</th>
                   <th class="px-3 py-2"></th>
@@ -429,13 +431,14 @@
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
                         :class="s.status === 'active' || s.status === 'trialing' ? 'bg-emerald-950 text-emerald-300'
-                              : s.status === 'cancelled' || s.status === 'expired' || s.status === 'halted' ? 'bg-rose-950 text-rose-300'
+                              : s.status === 'cancelledPending' || s.status === 'cancelled' || s.status === 'expired' || s.status === 'paymentFailed' || s.status === 'halted' ? 'bg-rose-950 text-rose-300'
                               : s.status === 'paused' ? 'bg-amber-950 text-amber-300'
                               : 'bg-slate-800 text-slate-400'"
                         x-text="s.status"></span>
                     </td>
+                    <td class="px-3 py-2 text-slate-300 text-xs" x-text="formatTime(s.subscribedAt) || '—'"></td>
                     <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(s.currentPeriodEndsAt) || '—'"></td>
-                    <td class="px-3 py-2 text-slate-400 text-xs" x-text="formatTime(s.cancelledAt) || '—'"></td>
+                    <td class="px-3 py-2 text-xs" :class="s.cancelledAt ? 'text-rose-300' : 'text-slate-400'" x-text="formatTime(s.cancelledAt) || '—'"></td>
                     <td class="px-3 py-2 text-right">
                       <button @click="jumpToLookup(s.uid)" class="text-xs text-purple-300 hover:text-purple-200 underline">View</button>
                     </td>
