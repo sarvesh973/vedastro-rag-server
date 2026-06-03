@@ -1880,6 +1880,70 @@ Return ONLY valid JSON, no markdown.`;
 // =========================================
 
 // Health check
+// ════════════════════════════════════════════════════════════════════
+//   /get — Play Store smart redirect (for Instagram / social bios)
+// ════════════════════════════════════════════════════════════════════
+// Instagram's in-app browser on Android silently fails to hand a raw
+// play.google.com link off to the Play Store app — tapping the bio link
+// does nothing. (iOS works because it opens a real Safari view.) This
+// page loads over https inside that webview, then force-opens the Play
+// Store APP via Android's intent:// scheme, which carries a
+// browser_fallback_url so it gracefully degrades to the web listing on
+// desktop / iOS / any device without the Play Store app.
+//
+// Put THIS url in the Instagram bio:  https://<host>/get
+const PLAY_PACKAGE = 'com.mokshastro.ai';
+const PLAY_WEB_URL = `https://play.google.com/store/apps/details?id=${PLAY_PACKAGE}`;
+const PLAY_INTENT_URL =
+  `intent://details?id=${PLAY_PACKAGE}#Intent;scheme=market;` +
+  `package=com.android.vending;` +
+  `S.browser_fallback_url=${encodeURIComponent(PLAY_WEB_URL)};end`;
+
+app.get('/get', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get Moksha — Vedic Astrology AI</title>
+<style>
+  html,body{height:100%;margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+    background:#0A0A1A;color:#EDE7FF;display:flex;align-items:center;justify-content:center;text-align:center}
+  .wrap{padding:32px}
+  .dot{width:54px;height:54px;border-radius:50%;margin:0 auto 18px;
+    background:radial-gradient(circle at 30% 30%,#9B6CFF,#3A1D7A)}
+  a{color:#C9B3FF}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="dot"></div>
+    <h2>Opening Moksha on Google Play…</h2>
+    <p>If it doesn't open automatically,
+       <a id="fallback" href="${PLAY_WEB_URL}">tap here</a>.</p>
+  </div>
+<script>
+(function () {
+  var ua = navigator.userAgent || '';
+  var isAndroid = /Android/i.test(ua);
+  var web = ${JSON.stringify(PLAY_WEB_URL)};
+  var intent = ${JSON.stringify(PLAY_INTENT_URL)};
+  if (isAndroid) {
+    // Fire the Play Store app intent. browser_fallback_url inside the
+    // intent handles the case where the Play app can't take it.
+    window.location.replace(intent);
+  } else {
+    // iOS / desktop: just go to the web listing.
+    window.location.replace(web);
+  }
+})();
+</script>
+</body>
+</html>`);
+});
+
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
