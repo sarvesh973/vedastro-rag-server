@@ -3123,6 +3123,51 @@ app.get('/admin/api/overview', async (req, res) => {
   }
 });
 
+// GET /admin/api/link-stats — bio/social link tap analytics.
+// Reads the per-day link_stats/{YYYY-MM-DD} docs written by /get and
+// returns daily rows + grand totals broken down by platform and source.
+app.get('/admin/api/link-stats', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
+    const snap = await firestoreDb.collection('link_stats').get();
+
+    const rows = [];
+    const totals = { total: 0, platforms: {}, sources: {} };
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      const row = {
+        date: doc.id,
+        total: d.total || 0,
+        platforms: {},
+        sources: {},
+      };
+      for (const [k, v] of Object.entries(d)) {
+        if (typeof v !== 'number') continue;
+        if (k.startsWith('platform_')) {
+          const p = k.slice('platform_'.length);
+          row.platforms[p] = v;
+          totals.platforms[p] = (totals.platforms[p] || 0) + v;
+        } else if (k.startsWith('src_')) {
+          const s = k.slice('src_'.length);
+          row.sources[s] = v;
+          totals.sources[s] = (totals.sources[s] || 0) + v;
+        }
+      }
+      totals.total += row.total;
+      rows.push(row);
+    });
+
+    // Newest first, capped to the requested window.
+    rows.sort((a, b) => (a.date < b.date ? 1 : -1));
+    res.json({ days: rows.slice(0, days), totals });
+  } catch (e) {
+    console.error('[admin/link-stats]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /admin/api/reports?limit=100 — recent AI reports (newest first).
 app.get('/admin/api/reports', async (req, res) => {
   if (!await requireAdmin(req, res)) return;

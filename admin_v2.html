@@ -655,6 +655,85 @@
           <div x-show="!lookupResult && lookupAttempted" class="text-center py-12 text-slate-500">No user found.</div>
         </section>
 
+        <!-- ===== LINK CLICKS ===== -->
+        <section x-show="tab === 'links'">
+          <div class="flex items-center justify-between mb-6">
+            <div>
+              <h2 class="text-lg font-semibold">Link Clicks</h2>
+              <p class="text-xs text-slate-500">Taps on the /get bio redirect. Installs (not just taps) appear in Play Console → Acquisition.</p>
+            </div>
+            <button @click="loadLinkStats()" :disabled="loading"
+              class="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-3 py-2 rounded text-sm">
+              <span x-text="loading ? 'Loading…' : 'Refresh'"></span>
+            </button>
+          </div>
+
+          <!-- Totals cards -->
+          <div x-show="linkStats" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="text-2xl font-bold" x-text="linkStats?.totals?.total ?? 0"></div>
+              <div class="text-xs text-slate-500">Total taps</div>
+            </div>
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="text-2xl font-bold" x-text="(linkStats?.totals?.platforms?.android ?? 0)"></div>
+              <div class="text-xs text-slate-500">Android</div>
+            </div>
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="text-2xl font-bold" x-text="(linkStats?.totals?.platforms?.ios ?? 0)"></div>
+              <div class="text-xs text-slate-500">iOS</div>
+            </div>
+            <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
+              <div class="text-2xl font-bold" x-text="(linkStats?.totals?.platforms?.other ?? 0)"></div>
+              <div class="text-xs text-slate-500">Other</div>
+            </div>
+          </div>
+
+          <!-- By source -->
+          <div x-show="linkStats && Object.keys(linkStats.totals.sources||{}).length" class="mb-6">
+            <h3 class="text-sm font-semibold text-slate-400 mb-2">By source</h3>
+            <div class="flex flex-wrap gap-2">
+              <template x-for="(count, src) in (linkStats?.totals?.sources || {})" :key="src">
+                <div class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-sm">
+                  <span class="font-mono text-purple-300" x-text="src"></span>
+                  <span class="text-slate-500"> · </span>
+                  <span class="font-semibold" x-text="count"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Daily table -->
+          <div x-show="linkStats && linkStats.days.length" class="rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-800/50 text-slate-400 text-xs">
+                <tr>
+                  <th class="text-left px-4 py-2">Date</th>
+                  <th class="text-right px-4 py-2">Total</th>
+                  <th class="text-right px-4 py-2">Android</th>
+                  <th class="text-right px-4 py-2">iOS</th>
+                  <th class="text-left px-4 py-2">Sources</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in (linkStats?.days || [])" :key="row.date">
+                  <tr class="border-t border-slate-800">
+                    <td class="px-4 py-2 font-mono text-xs" x-text="row.date"></td>
+                    <td class="px-4 py-2 text-right font-semibold" x-text="row.total"></td>
+                    <td class="px-4 py-2 text-right text-slate-400" x-text="row.platforms?.android ?? 0"></td>
+                    <td class="px-4 py-2 text-right text-slate-400" x-text="row.platforms?.ios ?? 0"></td>
+                    <td class="px-4 py-2 text-xs text-slate-500"
+                      x-text="Object.entries(row.sources||{}).map(([k,v])=>k+':'+v).join('  ')"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <div x-show="linkStats && !linkStats.days.length" class="text-center py-12 text-slate-500">
+            No taps recorded yet. Share <span class="font-mono text-purple-300">/get?src=instagram</span> and check back.
+          </div>
+        </section>
+
       </main>
     </div>
   </div>
@@ -702,6 +781,7 @@
           { id: 'feedback', label: 'Feedback', icon: '📝' },
           { id: 'chats', label: 'Chats', icon: '💬' },
           { id: 'lookup', label: 'User Lookup', icon: '👤' },
+          { id: 'links', label: 'Link Clicks', icon: '🔗' },
         ],
         overview: null,
         reports: [],
@@ -732,6 +812,7 @@
         lookupResult: null,
         chats: [],
         chatsLoading: false,
+        linkStats: null,
         chatsAttempted: false,
 
         get overviewCards() {
@@ -826,6 +907,19 @@
           if (t === 'chats' && this.recentChats.length === 0) await this.loadChatsTab();
           if (t === 'signups' && this.signups.length === 0) await this.loadSignups();
           if (t === 'subs' && this.subscriptions.length === 0) await this.loadSubscriptions();
+          if (t === 'links' && !this.linkStats) await this.loadLinkStats();
+        },
+
+        async loadLinkStats() {
+          this.loading = true;
+          try {
+            const r = await this.fetchApi('/admin/api/link-stats?days=60');
+            this.linkStats = await r.json();
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.loading = false;
+          }
         },
 
         async loadReports() {
