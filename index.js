@@ -894,18 +894,29 @@ async function generateResponse(prompt, opts) {
     ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
     : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
 
+  // Temperature: LOW by default. This is a citation-grounded task
+  // (rephrase deterministic chart facts + cited verses), NOT creative
+  // writing. The SDK default (~1.0) encourages the model to drift from
+  // the supplied facts — exactly what produced the "Venus mahadasha
+  // reported as Jupiter" hallucination. Callers can override (horoscope
+  // passes a higher value for a little day-to-day variety).
+  const temperature = (opts && typeof opts.temperature === 'number')
+    ? opts.temperature
+    : 0.15;
+
   for (const modelName of models) {
     try {
-      const modelConfig = { model: modelName };
+      const modelConfig = {
+        model: modelName,
+        generationConfig: { temperature },
+      };
       if (opts && opts.jsonSchema) {
-        modelConfig.generationConfig = {
-          responseMimeType: 'application/json',
-          responseSchema: opts.jsonSchema,
-        };
+        modelConfig.generationConfig.responseMimeType = 'application/json';
+        modelConfig.generationConfig.responseSchema = opts.jsonSchema;
       }
       const model = genAI.getGenerativeModel(modelConfig);
       const result = await model.generateContent(prompt);
-      console.log(`Generated response using ${modelName}${opts && opts.jsonSchema ? ' (json-schema)' : ''}`);
+      console.log(`Generated response using ${modelName} (temp=${temperature}${opts && opts.jsonSchema ? ', json-schema' : ''})`);
       return result.response.text();
     } catch (err) {
       console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
@@ -973,13 +984,23 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     if (dateStr.includes('/')) {
       const parts = dateStr.split('/');
       if (parts[2].length === 4) {
-        // DD/MM/YYYY or MM/DD/YYYY
+        // The app's UserProfile.dobFormatted sends DD/MM/YYYY, so
+        // parts[0]=day, parts[1]=month by default.
         day = parseInt(parts[0]);
         month = parseInt(parts[1]);
         year = parseInt(parts[2]);
-        // If day > 12, it's DD/MM/YYYY format
-        if (day > 12) {
-          [day, month] = [month, day]; // swap to get correct values
+        // Swap ONLY if the SECOND field is > 12 — that can only be a day,
+        // meaning the input was actually MM/DD/YYYY (American). Never swap
+        // based on the first field: a first field > 12 in DD/MM (e.g.
+        // 16/09 = 16 Sept) is a perfectly valid day and must NOT move.
+        //
+        // PREVIOUS BUG: this swapped when day>12, which corrupted EVERY
+        // DD/MM date after the 12th of a month (16/09 -> month 16),
+        // making calculateChart return null. Result: every user born on
+        // the 13th-31st got no chart, no dasha, and "I cannot calculate
+        // your dasha" replies. This was ~60% of users.
+        if (month > 12 && day <= 12) {
+          [day, month] = [month, day];
         }
       } else {
         year = parseInt(parts[0]);
@@ -1524,10 +1545,15 @@ function buildChatPrompt(question, relevantChunks, userProfile, chatHistory, cha
   const tone = classifier && classifier.tone ? classifier.tone : 'neutral';
   const topic = classifier && classifier.topic ? classifier.topic : 'general';
   const focusBlock = focus
-    ? `QUESTION-SPECIFIC FOCUS (REQUIRED — anchor your reasoning here, do NOT default to current dasha for every answer):
+    ? `QUESTION-SPECIFIC FOCUS — anchor your reasoning on the chart factor(s) below:
 ${focus}
 Tone for THIS reply: ${tone}.
 Sub-topic: ${topic}.
+EXCEPTION: if the user's question is itself about their dasha / mahadasha /
+antardasha / current planetary period / "kaal", IGNORE the focus above and
+answer directly from the CURRENT DASHA PERIOD block in the chart — naming the
+EXACT mahadasha and antardasha planets written there. Never substitute a
+different planet.
 `
     : '';
 
@@ -1619,11 +1645,12 @@ RULES FOR THE JSON:
 CONVERSATION RULES:
 - This is an ONGOING CONVERSATION. Read the chat history below and continue naturally. Do not re-introduce yourself.
 - Use the USER'S ACTUAL BIRTH CHART for personalized predictions. Reference specific planets, houses, and current dasha.
-- VARY your chart references per question type — do NOT anchor every answer on the current Mahadasha/Antardasha. Career questions should foreground the 10th lord and Dasamsa. Marriage should foreground the 7th lord and Navamsha. Health should foreground the 6th lord and ascendant. Property the 4th lord. Education the 4th + 5th lords. Children the 5th lord and Jupiter. Only mention current dasha when it is genuinely the strongest signal for that specific question.
-- DASHA FIDELITY — STRICT: the CURRENT DASHA PERIOD section above contains the chart's actual active Mahadasha, Antardasha, and Pratyantar. Treat these as ground truth. TWO equally bad failures, never do either:
-  (a) FABRICATION — naming any planet as the current Mahadasha / Antardasha / Pratyantar that does NOT match the names above. This is the worst credibility error — users cross-check against other apps and notice instantly.
-  (b) REFUSAL — saying "I do not know your current dasha" or "this needs to be calculated from your nakshatra" when the answer is literally written in the CURRENT DASHA PERIOD block above. If the user asks "what is my mahadasha?" and the block says "Mahadasha: Venus", you MUST answer "Aapki vartaman Mahadasha Venus hai" — do not hedge, do not punt to "consult an astrologer", do not lecture about how dasha is calculated. Answer with the planet names from the block.
-  The only time it is OK to hedge is if CURRENT DASHA PERIOD is genuinely absent from the chart context above (which means the user has no birth-time on file). Then you may say "exact dasha needs your birth time".
+- LEAD WITH THE QUESTION'S OWN HOUSE/LORD — do NOT turn every answer into a dasha reading. This is an interpretation rule, it does NOT permit altering any chart fact. Foreground the house/lord most relevant to the question and build the answer around it: career → 10th lord + Dasamsa (D10); marriage → 7th lord + Navamsha (D9); health → 6th lord + ascendant; property → 4th lord; education → 4th + 5th lords; children → 5th lord + Jupiter; wealth → 2nd + 11th lords; family → relevant bhava + karaka. Mention the current Mahadasha/Antardasha ONLY when (a) the question is itself about dasha/timing/"when will X happen", OR (b) the running dasha lord is genuinely the strongest signal for THIS specific question. For a normal topic question, one sentence connecting it to the dasha is the maximum — the bulk of the answer must come from the question's own house, lord, and relevant divisional chart. An answer that leads every topic with "you are in X mahadasha" is WRONG even if the dasha is correct.
+- HOUSE & SIGN FIDELITY — STRICT: a planet's house number, sign, and nakshatra are EXACTLY as written in the PLANETARY POSITIONS block. If it says "Jupiter ... House 4", it is the 4th house — never the 5th. Never recount, shift, or guess a house/sign. You may interpret what a placement means; you may not change the placement.
+- DASHA ACCURACY — WHEN YOU DO mention the dasha, it must be correct (this rule is about correctness, NOT about how often to bring it up — see the LEAD WITH THE QUESTION'S OWN HOUSE/LORD rule above for when to mention it). The CURRENT DASHA PERIOD section contains the chart's actual active Mahadasha, Antardasha, and Pratyantar. Two failures to avoid whenever the dasha comes up:
+  (a) FABRICATION — never name a planet as the current Mahadasha / Antardasha / Pratyantar that does NOT match the names in that block. State the dasha exactly as written, never a substitute planet.
+  (b) REFUSAL — if the user directly asks "what is my mahadasha?" and the block says "Mahadasha: Venus", answer plainly "Aapki vartaman Mahadasha Venus hai". Do not punt to "consult an astrologer" or lecture on how dasha is calculated when the answer is right there in the block.
+  The only time it is OK to hedge is if CURRENT DASHA PERIOD is genuinely absent from the chart context above (the user has no birth-time on file). Then you may say "exact dasha needs your birth time".
 - If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
 - If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
 - Keep the total content (all summary + all explanations) under ~320 words.
@@ -1668,7 +1695,18 @@ ${focusBlock}
 ${rulesBlock}
 ${historyContext}
 
-REFERENCE VERSES (use these for accuracy — DO NOT cite them by name in your reply):
+REFERENCE VERSES — RAG GROUNDING (STRICT):
+These are the ONLY classical sources you may cite. Rules:
+- Every classical claim in your "details" reasoning must be supported by
+  one of the verses below. Ground your explanation in what these verses
+  actually say about the user's specific placements.
+- In details[].chapter, name ONLY a book + chapter that appears in the
+  list below. NEVER cite a book, chapter, or verse number that is not
+  present here — fabricating a citation is a serious error.
+- If a point you want to make is NOT supported by any verse below, either
+  omit it or state it plainly as general principle WITHOUT a fake citation.
+- Do NOT paste verse text verbatim into the body; explain it in plain
+  ${(language || '').toLowerCase().startsWith('en') ? 'English' : 'Hinglish'}, applied to THIS user's chart.
 ${versesContext}
 
 USER'S LATEST MESSAGE: ${question}
@@ -1842,6 +1880,118 @@ Return ONLY valid JSON, no markdown.`;
 // =========================================
 
 // Health check
+// ════════════════════════════════════════════════════════════════════
+//   /get — Play Store smart redirect (for Instagram / social bios)
+// ════════════════════════════════════════════════════════════════════
+// Instagram's in-app browser on Android silently fails to hand a raw
+// play.google.com link off to the Play Store app — tapping the bio link
+// does nothing. (iOS works because it opens a real Safari view.) This
+// page loads over https inside that webview, then force-opens the Play
+// Store APP via Android's intent:// scheme, which carries a
+// browser_fallback_url so it gracefully degrades to the web listing on
+// desktop / iOS / any device without the Play Store app.
+//
+// Put THIS url in the bio. Add ?src=<channel> per platform to attribute
+// taps + installs:  /get?src=instagram , /get?src=youtube , /get?src=whatsapp
+const PLAY_PACKAGE = 'com.mokshastro.ai';
+
+// Sanitize a caller-supplied source tag to a safe short token.
+function sanitizeSrc(s) {
+  const t = String(s || 'direct').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 24);
+  return t || 'direct';
+}
+
+// Play Store install-referrer string. Google Play captures this and
+// surfaces it in Play Console → Acquisition reports (UTM), so you can
+// see INSTALLS (not just taps) per source — the metric that matters.
+function playReferrer(src) {
+  return `utm_source=${src}&utm_medium=bio&utm_campaign=social`;
+}
+function playWebUrl(src) {
+  return `https://play.google.com/store/apps/details?id=${PLAY_PACKAGE}` +
+    `&referrer=${encodeURIComponent(playReferrer(src))}`;
+}
+function playIntentUrl(src) {
+  return `intent://details?id=${PLAY_PACKAGE}` +
+    `&referrer=${encodeURIComponent(playReferrer(src))}` +
+    `#Intent;scheme=market;package=com.android.vending;` +
+    `S.browser_fallback_url=${encodeURIComponent(playWebUrl(src))};end`;
+}
+
+// Best-effort tap counter. One atomic write per click to a per-day doc;
+// no reads, non-blocking, failures swallowed. Gives daily totals broken
+// down by platform and source — viewable in Firestore console at
+// link_stats/{YYYY-MM-DD}.
+function logLinkClick(src, platform) {
+  if (!firestoreDb) return;
+  const day = new Date().toISOString().slice(0, 10);
+  const inc = firebaseAdmin.firestore.FieldValue.increment(1);
+  firestoreDb.doc(`link_stats/${day}`).set({
+    total: inc,
+    [`platform_${platform}`]: inc,
+    [`src_${src}`]: inc,
+    updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true }).catch((e) => console.warn('[get] click log failed:', e.message));
+}
+
+app.get('/get', (req, res) => {
+  const src = sanitizeSrc(req.query.src);
+  const ua = req.get('user-agent') || '';
+  const platform = /android/i.test(ua)
+    ? 'android'
+    : (/iphone|ipad|ipod/i.test(ua) ? 'ios' : 'other');
+
+  // Fire-and-forget tap log; never blocks the redirect.
+  logLinkClick(src, platform);
+  console.log(`[get] tap src=${src} platform=${platform}`);
+
+  const webUrl = playWebUrl(src);
+  const intentUrl = playIntentUrl(src);
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get Moksha — Vedic Astrology AI</title>
+<style>
+  html,body{height:100%;margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+    background:#0A0A1A;color:#EDE7FF;display:flex;align-items:center;justify-content:center;text-align:center}
+  .wrap{padding:32px}
+  .dot{width:54px;height:54px;border-radius:50%;margin:0 auto 18px;
+    background:radial-gradient(circle at 30% 30%,#9B6CFF,#3A1D7A)}
+  a{color:#C9B3FF}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="dot"></div>
+    <h2>Opening Moksha on Google Play…</h2>
+    <p>If it doesn't open automatically,
+       <a id="fallback" href="${webUrl}">tap here</a>.</p>
+  </div>
+<script>
+(function () {
+  var ua = navigator.userAgent || '';
+  var isAndroid = /Android/i.test(ua);
+  var web = ${JSON.stringify(webUrl)};
+  var intent = ${JSON.stringify(intentUrl)};
+  if (isAndroid) {
+    // Fire the Play Store app intent. browser_fallback_url inside the
+    // intent handles the case where the Play app can't take it.
+    window.location.replace(intent);
+  } else {
+    // iOS / desktop: just go to the web listing.
+    window.location.replace(web);
+  }
+})();
+</script>
+</body>
+</html>`);
+});
+
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -2442,7 +2592,12 @@ app.post('/chat', async (req, res) => {
     // like "Unexpected non-whitespace character after JSON" or
     // "Expected ',' or ']' after array element"). The fallback parser
     // chain below stays in place as defense in depth.
-    const raw = await generateResponse(prompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
+    // temp 0.35: low enough to stay faithful to the chart facts, high
+    // enough to let the model vary which house/lord it foregrounds by
+    // question type. At 0.15 the model rigidly latched onto the single
+    // most-emphasized instruction (the dasha block) and answered every
+    // question — career, marriage, health — as a dasha reading.
+    const raw = await generateResponse(prompt, { jsonSchema: CHAT_RESPONSE_SCHEMA, temperature: 0.35 });
 
     // The prompt asks for JSON { summary: [...], details: [...] }.
     // Parse it; fall back to a single-point answer on malformed output.
@@ -2546,7 +2701,9 @@ app.post('/chat', async (req, res) => {
           const retryPrompt = prompt + '\n\n' + correction;
           console.log('[fidelity] retrying with correction prompt');
           try {
-            const rawRetry = await generateResponse(retryPrompt, { jsonSchema: CHAT_RESPONSE_SCHEMA });
+            // Lower temp on the correction retry — we want it to comply
+            // precisely with the named fact fixes, not get creative.
+            const rawRetry = await generateResponse(retryPrompt, { jsonSchema: CHAT_RESPONSE_SCHEMA, temperature: 0.2 });
             const cleanRetry = rawRetry.replace(/```json?/gi, '').replace(/```/g, '').trim();
             const oldSummary = summary.slice();
             const oldDetails = details.slice();
@@ -3001,6 +3158,51 @@ app.get('/admin/api/overview', async (req, res) => {
   }
 });
 
+// GET /admin/api/link-stats — bio/social link tap analytics.
+// Reads the per-day link_stats/{YYYY-MM-DD} docs written by /get and
+// returns daily rows + grand totals broken down by platform and source.
+app.get('/admin/api/link-stats', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+  if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
+    const snap = await firestoreDb.collection('link_stats').get();
+
+    const rows = [];
+    const totals = { total: 0, platforms: {}, sources: {} };
+    snap.forEach((doc) => {
+      const d = doc.data() || {};
+      const row = {
+        date: doc.id,
+        total: d.total || 0,
+        platforms: {},
+        sources: {},
+      };
+      for (const [k, v] of Object.entries(d)) {
+        if (typeof v !== 'number') continue;
+        if (k.startsWith('platform_')) {
+          const p = k.slice('platform_'.length);
+          row.platforms[p] = v;
+          totals.platforms[p] = (totals.platforms[p] || 0) + v;
+        } else if (k.startsWith('src_')) {
+          const s = k.slice('src_'.length);
+          row.sources[s] = v;
+          totals.sources[s] = (totals.sources[s] || 0) + v;
+        }
+      }
+      totals.total += row.total;
+      rows.push(row);
+    });
+
+    // Newest first, capped to the requested window.
+    rows.sort((a, b) => (a.date < b.date ? 1 : -1));
+    res.json({ days: rows.slice(0, days), totals });
+  } catch (e) {
+    console.error('[admin/link-stats]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /admin/api/reports?limit=100 — recent AI reports (newest first).
 app.get('/admin/api/reports', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
@@ -3307,10 +3509,16 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       rows.push({
         uid,
         plan: d.plan || d.planId || null,
-        status: d.status || 'unknown',
+        // The webhook writes the canonical lifecycle field `state`
+        // (trialing/active/cancelledPending/expired). Older docs may
+        // have `status`. Prefer state, fall back to status.
+        status: d.state || d.status || 'unknown',
         razorpaySubscriptionId: d.razorpaySubscriptionId || null,
         trialEndsAt: toIso(d.trialEndsAt),
         currentPeriodEndsAt: toIso(d.currentPeriodEndsAt),
+        // When they subscribed: activatedAt (written on
+        // subscription.authenticated/activated), falling back to createdAt.
+        subscribedAt: toIso(d.activatedAt) || toIso(d.createdAt),
         cancelledAt: toIso(d.cancelledAt),
         updatedAt: toIso(d.updatedAt),
         createdAt: toIso(d.createdAt),
@@ -3331,17 +3539,18 @@ app.get('/admin/api/subscriptions', async (req, res) => {
     }
     for (const r of rows) r.email = emailMap[r.uid] || null;
 
-    // Order: active first, then by most recent activity desc.
+    // Order: most recently subscribed first (newest sign-ups on top).
     rows.sort((a, b) => {
-      const sa = a.status === 'active' ? 0 : 1;
-      const sb = b.status === 'active' ? 0 : 1;
-      if (sa !== sb) return sa - sb;
-      const ta = a.cancelledAt || a.updatedAt || a.currentPeriodEndsAt || '';
-      const tb = b.cancelledAt || b.updatedAt || b.currentPeriodEndsAt || '';
+      const ta = a.subscribedAt || a.updatedAt || '';
+      const tb = b.subscribedAt || b.updatedAt || '';
       return tb.localeCompare(ta);
     });
 
-    const summary = { total: rows.length, active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, trialing: 0, other: 0 };
+    const summary = {
+      total: rows.length,
+      active: 0, trialing: 0, cancelledPending: 0, expired: 0,
+      paused: 0, halted: 0, paymentFailed: 0, other: 0,
+    };
     for (const r of rows) {
       if (summary[r.status] !== undefined) summary[r.status]++;
       else summary.other++;
