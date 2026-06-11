@@ -2921,7 +2921,18 @@ app.get('/admin/api/overview', async (req, res) => {
     // so we use a collectionGroup query. Filter to docId == 'current' to
     // avoid grabbing any historical revisions.
     const byPlan = { trial: 0, standard: 0, premium: 0 };
-    const byStatus = { active: 0, cancelled: 0, expired: 0, paused: 0, halted: 0, trialing: 0, authenticated: 0, other: 0 };
+    const byState = {
+      trialing: 0, active: 0, cancelledPending: 0,
+      paymentFailed: 0, expired: 0, paused: 0, other: 0,
+    };
+    // Trial conversion funnel — we look at every record whose plan was
+    // 'trial' at some point, then bucket by current state.
+    // started   = ever started a trial (regardless of current state)
+    // converted = trial that successfully auto-charged ₹99 (state=active)
+    // inTrial   = still in the 7-day free window (state=trialing)
+    // cancelled = cancelled before day 7 (state=cancelledPending or expired)
+    // failed    = bank declined the day-7 debit (state=paymentFailed)
+    const trial = { started: 0, converted: 0, inTrial: 0, cancelled: 0, failed: 0 };
     let subTotal = 0;
     try {
       const subsSnap = await firestoreDb.collectionGroup('subscription').get();
@@ -2929,22 +2940,41 @@ app.get('/admin/api/overview', async (req, res) => {
         if (doc.id !== 'current') return;
         subTotal++;
         const d = doc.data() || {};
-        // The webhook writes either { plan: 'standard' } or { planId: 'plan_xxx' }.
-        // We normalize common values; everything else falls through and is
-        // ignored (so we don't pollute the counts with stray plan_ ids).
         const planRaw = String(d.plan || d.planId || '').toLowerCase();
-        if (planRaw.includes('premium')) byPlan.premium++;
-        else if (planRaw.includes('standard')) byPlan.standard++;
-        else if (planRaw.includes('trial')) byPlan.trial++;
+        const isPremium  = planRaw.includes('premium');
+        const isStandard = planRaw.includes('standard');
+        const isTrial    = planRaw.includes('trial');
+        if (isPremium) byPlan.premium++;
+        else if (isStandard) byPlan.standard++;
+        else if (isTrial) byPlan.trial++;
         else if (byPlan[planRaw] !== undefined) byPlan[planRaw]++;
 
-        const status = String(d.status || 'other').toLowerCase();
-        if (byStatus[status] !== undefined) byStatus[status]++;
-        else byStatus.other++;
+        // Webhook (syncSubscriptionToFirestore) writes `state` not `status`.
+        // Old code looked for d.status which never matched -> empty stats.
+        const state = String(d.state || d.status || 'other');
+        if (byState[state] !== undefined) byState[state]++;
+        else byState.other++;
+
+        // Trial funnel
+        if (isTrial) {
+          trial.started++;
+          if (state === 'active') trial.converted++;
+          else if (state === 'trialing') trial.inTrial++;
+          else if (state === 'cancelledPending' || state === 'expired') trial.cancelled++;
+          else if (state === 'paymentFailed') trial.failed++;
+        }
       });
     } catch (e) {
       console.warn('[admin/overview] subscriptions query failed:', e.message);
     }
+
+    // Conversion = converted / (eligible = started - still in trial).
+    // We exclude "still in trial" from the denominator because their fate
+    // hasn't been decided yet — otherwise the ratio drifts during testing.
+    const eligible = trial.started - trial.inTrial;
+    const conversionRate = eligible > 0
+      ? Math.round((trial.converted / eligible) * 1000) / 10
+      : null;
 
     res.json({
       counts: {
@@ -2957,7 +2987,12 @@ app.get('/admin/api/overview', async (req, res) => {
       subscriptions: {
         total: subTotal,
         byPlan,
-        byStatus,
+        byState,
+        trial: {
+          ...trial,
+          eligible,
+          conversionRatePct: conversionRate, // null if no eligible trials yet
+        },
       },
     });
   } catch (e) {
