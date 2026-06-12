@@ -862,6 +862,7 @@
           if (!o) return [];
           return [
             { label: 'Total users', value: o.counts?.users, colour: 'text-purple-300' },
+            { label: 'Questions asked', value: (o.counts?.questionsAsked ?? o.counts?.chatMessages) ?? '—', colour: 'text-sky-300' },
             { label: 'Signups 7d', value: o.counts?.signups7Days, colour: 'text-purple-300' },
             { label: 'Signups 30d', value: o.counts?.signups30Days, colour: 'text-purple-300' },
             { label: 'Active subs', value: o.subscriptions?.byStatus?.active ?? 0, colour: 'text-emerald-400' },

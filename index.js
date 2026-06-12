@@ -3045,6 +3045,29 @@ app.get('/admin/api/overview', async (req, res) => {
       firestoreDb.collection('ai_reports').count().get(),
     ]);
 
+    // Total chat activity across all users (collection-group aggregate —
+    // cheap, doesn't read the docs). `chatMessages` is user + AI bubbles;
+    // `questionsAsked` is just the user-role messages (the real "how many
+    // questions" number). The role-filtered count may need a one-time
+    // collection-group index — if it errors we leave questionsAsked null
+    // and surface the index hint, while chatMessages still works.
+    let chatMessages = null, questionsAsked = null, chatIndexUrl = null;
+    try {
+      const msgAgg = await firestoreDb.collectionGroup('chats').count().get();
+      chatMessages = msgAgg.data().count;
+    } catch (e) {
+      console.warn('[admin/overview] chat messages count failed:', e.message);
+    }
+    try {
+      const qAgg = await firestoreDb.collectionGroup('chats')
+        .where('role', '==', 'user').count().get();
+      questionsAsked = qAgg.data().count;
+    } catch (e) {
+      const m = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
+      if (m) chatIndexUrl = m[0];
+      console.warn('[admin/overview] questions count failed:', e.message);
+    }
+
     // Signups in last 7 / 30 days — page through Firebase Auth.
     // listUsers is cheap at this scale (51 users) and gives us the real
     // account creation time, not the profile-update timestamp.
@@ -3140,6 +3163,9 @@ app.get('/admin/api/overview', async (req, res) => {
         aiReports: reportsAgg.data().count,
         signups7Days: signups7,
         signups30Days: signups30,
+        chatMessages,
+        questionsAsked,
+        chatIndexUrl,
       },
       subscriptions: {
         total: subTotal,
