@@ -1992,6 +1992,72 @@ app.get('/get', (req, res) => {
 </html>`);
 });
 
+// ════════════════════════════════════════════════════════════════════
+//   LEGAL PAGES — hosted privacy / terms / refund (public URLs)
+// ════════════════════════════════════════════════════════════════════
+// Meta app registration + Google Play both require a public privacy
+// policy URL. We render the markdown in legal/*.md as styled HTML so
+// there's one source of truth, reusable for Meta, Play, and the in-app
+// Legal screen:
+//   /privacy   /terms   /refund
+const fsLegal = require('fs');
+const pathLegal = require('path');
+const _legalCache = {};
+
+// Minimal, dependency-free markdown -> HTML. Handles the subset our
+// legal docs use: #/##/### headings, **bold**, - bullet lists, blank-line
+// paragraphs. HTML-escapes everything first so the docs can't inject markup.
+function renderMarkdown(md) {
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let inList = false;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (let raw of lines) {
+    const line = raw.trimEnd();
+    const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    if (/^### /.test(line)) { closeList(); out.push('<h3>' + inline(line.slice(4)) + '</h3>'); }
+    else if (/^## /.test(line)) { closeList(); out.push('<h2>' + inline(line.slice(3)) + '</h2>'); }
+    else if (/^# /.test(line)) { closeList(); out.push('<h1>' + inline(line.slice(2)) + '</h1>'); }
+    else if (/^[-*] /.test(line)) { if (!inList) { out.push('<ul>'); inList = true; } out.push('<li>' + inline(line.slice(2)) + '</li>'); }
+    else if (line === '') { closeList(); }
+    else { closeList(); out.push('<p>' + inline(line) + '</p>'); }
+  }
+  closeList();
+  return out.join('\n');
+}
+
+function serveLegal(res, slug, title) {
+  try {
+    if (!_legalCache[slug]) {
+      const file = pathLegal.join(__dirname, 'legal', slug + '.md');
+      _legalCache[slug] = renderMarkdown(fsLegal.readFileSync(file, 'utf8'));
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title} — Moksha</title>
+<style>
+  body{margin:0;background:#0A0A1A;color:#E7E2F5;font-family:-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.6}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 22px 80px}
+  h1{color:#C9B3FF;font-size:26px} h2{color:#B79CFF;font-size:19px;margin-top:30px}
+  h3{color:#A88FE6;font-size:16px} a{color:#9B6CFF} strong{color:#F0EBFF}
+  ul{padding-left:20px} li{margin:4px 0} p{margin:10px 0}
+  .foot{margin-top:48px;border-top:1px solid #2A2540;padding-top:16px;color:#7A739A;font-size:13px}
+</style></head><body><div class="wrap">
+${_legalCache[slug]}
+<div class="foot">Moksha — Vedic Astrology AI · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/refund">Refund</a></div>
+</div></body></html>`);
+  } catch (e) {
+    console.error('[legal] ' + slug + ' failed:', e.message);
+    res.status(500).send('Unable to load this page.');
+  }
+}
+
+app.get('/privacy', (req, res) => serveLegal(res, 'privacy-policy', 'Privacy Policy'));
+app.get('/terms', (req, res) => serveLegal(res, 'terms-of-service', 'Terms of Service'));
+app.get('/refund', (req, res) => serveLegal(res, 'refund-policy', 'Refund Policy'));
+
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
