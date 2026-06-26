@@ -146,15 +146,27 @@ async function verifyAuth(req, res, { allowAnonymous = false } = {}) {
         if (subDoc.exists) {
           const sub = subDoc.data() || {};
           if (sub.plan && activeStates.has(sub.state)) {
-            plan = sub.plan;
+            // One-time Starter Pass: honour it only until passExpiresAt.
+            // After 7 days it lapses and the user is treated as free again
+            // (no auto-renewal). Recurring plans have no passExpiresAt.
+            const passExp = sub.passExpiresAt && sub.passExpiresAt.toDate
+              ? sub.passExpiresAt.toDate() : null;
+            const passExpired = sub.isOneTime && passExp && passExp.getTime() < Date.now();
+            if (!passExpired) {
+              plan = sub.plan;
+            }
           }
         }
 
         // Legacy fallback. Only consulted if the canonical doc didn't
         // give us a paid plan — otherwise we'd let a stale usage entry
-        // downgrade a current subscriber.
+        // downgrade a current subscriber. Also respect an expired pass
+        // mirrored onto usage/{uid}.
         if (plan === 'free' && usageDoc.exists && usageDoc.data().plan) {
-          plan = usageDoc.data().plan;
+          const u = usageDoc.data();
+          const uExp = u.passExpiresAt && u.passExpiresAt.toDate ? u.passExpiresAt.toDate() : null;
+          const uExpired = uExp && uExp.getTime() < Date.now();
+          if (!uExpired) plan = u.plan;
         }
       }
     } catch (_) {}
@@ -189,8 +201,13 @@ const RATE_LIMITS = {
   // day, because the screen auto-fires /chat to generate the readings.
   // Separated into its own quota so users can BROWSE their chart freely
   // without losing their ability to actually chat.
+  // free.chat is enforced as a LIFETIME total (1 chat ever), not per-day —
+  // see the lifetime check in the /chat handler. The value here is the
+  // daily backstop.
   free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5 },
-  trial:       { chat: 10,  palm: 2,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
+  // 'trial' is now the one-time ₹49 Starter Pass: 5 chats/DAY for 7 days,
+  // NO palm. (Enum name kept for plumbing compat; it is not a free trial.)
+  trial:       { chat: 5,   palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
   standard:    { chat: 30,  palm: 5,  horoscope: 100, chart: 100, search: 200, insight: 60 },
   premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500, insight: 200 },
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0,   insight: 0 },
@@ -2118,8 +2135,15 @@ app.post('/subscription/create', async (req, res) => {
       });
     }
 
+    // The Starter Pass ('trial') is now a ONE-TIME ₹49 order, not a
+    // recurring subscription — it must go through /order/create, not here.
+    if (plan === 'trial') {
+      return res.status(400).json({
+        error: 'The Starter Pass is a one-time purchase. Use /order/create.',
+      });
+    }
     if (!plan || !VALID_PLAN_IDS[plan]) {
-      return res.status(400).json({ error: 'Invalid plan. Use trial, standard, or premium.' });
+      return res.status(400).json({ error: 'Invalid plan. Use standard or premium.' });
     }
 
     if (!isRazorpayConfigured) {
@@ -2182,6 +2206,103 @@ app.post('/subscription/create', async (req, res) => {
   } catch (e) {
     console.error('[subscription/create] Error:', e.message);
     return res.status(500).json({ error: e.message || 'Subscription creation failed' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+//   STARTER PASS — one-time ₹49 / 7-day order (Razorpay Orders API)
+// ════════════════════════════════════════════════════════════════════
+const STARTER_PASS_PAISE = 4900;   // ₹49
+const STARTER_PASS_DAYS = 7;
+
+// POST /order/create — create a Razorpay ORDER for the one-time ₹49
+// Starter Pass (no mandate, no auto-renewal). Returns the order so the
+// app can open Razorpay checkout with order_id (NOT subscription_id).
+app.post('/order/create', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  try {
+    if (auth.isAdmin) {
+      return res.json({ admin: true, message: 'Admin — full access, no purchase needed.' });
+    }
+    if (!isRazorpayConfigured) {
+      return res.status(503).json({ error: 'Razorpay not configured on server.' });
+    }
+    let Razorpay;
+    try { Razorpay = require('razorpay'); }
+    catch (e) { return res.status(503).json({ error: 'razorpay npm package not installed' }); }
+
+    const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
+    const order = await rzp.orders.create({
+      amount: STARTER_PASS_PAISE,    // paise
+      currency: 'INR',
+      receipt: `pass_${auth.uid}_${Date.now()}`.slice(0, 40),
+      notes: { userId: auth.uid, userEmail: auth.email || '', plan: 'trial', app: 'vedastro_ai' },
+    });
+    return res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: RAZORPAY_KEY_ID,       // app needs this to open checkout
+    });
+  } catch (e) {
+    console.error('[order/create] Error:', e.message);
+    return res.status(500).json({ error: e.message || 'Order creation failed' });
+  }
+});
+
+// POST /order/verify — verify the Razorpay payment signature and grant the
+// 7-day Starter Pass. This is the authoritative grant path (server-side
+// signature check), so it doesn't depend on the webhook firing.
+// Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+app.post('/order/verify', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ error: 'Missing payment fields' });
+    }
+    // Verify signature: HMAC_SHA256(order_id|payment_id, KEY_SECRET).
+    const crypto = require('crypto');
+    const expected = crypto
+      .createHmac('sha256', RAZORPAY_KEY_SECRET)
+      .update(razorpay_order_id + '|' + razorpay_payment_id)
+      .digest('hex');
+    if (expected !== razorpay_signature) {
+      console.warn('[order/verify] signature mismatch for uid=' + auth.uid);
+      return res.status(400).json({ error: 'Payment verification failed' });
+    }
+
+    // Grant the pass: 7 days from now. Written to the canonical doc the app
+    // + verifyAuth read, with isOneTime + passExpiresAt so the tier reverts
+    // to free automatically once it lapses (see verifyAuth).
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + STARTER_PASS_DAYS * 24 * 60 * 60 * 1000);
+    if (firestoreDb) {
+      await firestoreDb.doc(`users/${auth.uid}/subscription/current`).set({
+        plan: 'trial',
+        state: 'active',
+        isOneTime: true,
+        passExpiresAt: firebaseAdmin.firestore.Timestamp.fromDate(expiresAt),
+        currentPeriodEndsAt: firebaseAdmin.firestore.Timestamp.fromDate(expiresAt),
+        razorpayOrderId: razorpay_order_id,
+        razorpayPaymentId: razorpay_payment_id,
+        activatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      // Mirror onto usage/{uid} so the rate-limit tier (verifyAuth) sees it.
+      await firestoreDb.doc(`usage/${auth.uid}`).set({
+        isPremium: true, plan: 'trial',
+        passExpiresAt: firebaseAdmin.firestore.Timestamp.fromDate(expiresAt),
+        updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+    console.log(`[order/verify] Starter Pass granted uid=${auth.uid} until ${expiresAt.toISOString()}`);
+    return res.json({ ok: true, plan: 'trial', expiresAt: expiresAt.toISOString() });
+  } catch (e) {
+    console.error('[order/verify] Error:', e.message);
+    return res.status(500).json({ error: e.message || 'Verification failed' });
   }
 });
 
@@ -2550,6 +2671,30 @@ app.post('/chat', async (req, res) => {
     if (rateAction === 'insight') {
       console.log(`[chat] routing kundli-insight prompt to 'insight' quota for uid=${auth.uid}`);
     }
+
+    // FREE = 1 chat LIFETIME (not per-day). Free users get a single real
+    // chat ever; after that the ₹49 Starter Pass paywall appears. Enforced
+    // via a lifetime counter on usage/{uid} (kundli `insight` prompts are
+    // exempt — they have their own quota and aren't "real" questions).
+    let freeChatToCharge = false;
+    if (!auth.isAdmin && auth.plan === 'free' && rateAction === 'chat' && firestoreDb) {
+      try {
+        const uDoc = await firestoreDb.doc(`usage/${auth.uid}`).get();
+        const used = (uDoc.exists && uDoc.data().freeChatsUsed) || 0;
+        if (used >= 1) {
+          console.warn(`[chat] free lifetime limit reached uid=${auth.uid} (used=${used})`);
+          return res.status(429).json({
+            error: 'You have used your free chat. Get the ₹49 Starter Pass for 5 chats a day for 7 days.',
+            paywall: true,
+            plan: 'free',
+          });
+        }
+        freeChatToCharge = true; // increment after a successful answer
+      } catch (e) {
+        console.warn('[chat] free-lifetime check failed (allowing):', e.message);
+      }
+    }
+
     if (!await rateLimit(auth, rateAction, res)) return;
 
     if (auth.isAdmin) {
@@ -2826,6 +2971,19 @@ app.post('/chat', async (req, res) => {
       storeConversation(userProfile, birthDate, birthTime, place, question, answer, !!chartData, sources);
     } catch (logErr) {
       console.log('Conv log error:', logErr.message);
+    }
+
+    // Burn the user's single lifetime free chat now that a real answer was
+    // produced (free-plan real chats only; insight prompts are exempt).
+    if (freeChatToCharge && firestoreDb) {
+      try {
+        await firestoreDb.doc(`usage/${auth.uid}`).set({
+          freeChatsUsed: firebaseAdmin.firestore.FieldValue.increment(1),
+          updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+      } catch (e) {
+        console.warn('[chat] freeChatsUsed increment failed:', e.message);
+      }
     }
 
     return res.json({
