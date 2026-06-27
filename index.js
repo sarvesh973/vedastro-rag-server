@@ -804,6 +804,8 @@ Return this exact JSON shape:
       generationConfig: {
         responseMimeType: 'application/json', // force JSON, no markdown fences
         temperature: 0.2,
+        // No thinking needed for a simple classification — saves output tokens.
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
     // Hard 3s timeout — if the classifier is slow we'd rather fall back
@@ -925,7 +927,15 @@ async function generateResponse(prompt, opts) {
     try {
       const modelConfig = {
         model: modelName,
-        generationConfig: { temperature },
+        generationConfig: {
+          temperature,
+          // Disable Gemini 2.5 "thinking" tokens. They bill as OUTPUT
+          // (~₹210/1M) and for RAG answers grounded in retrieved chunks +
+          // a deterministic chart they add little quality but multiply
+          // cost. This was the main driver of the Gemini bill spike.
+          // Bump this (e.g. 256) if answer quality visibly drops.
+          thinkingConfig: { thinkingBudget: 0 },
+        },
       };
       if (opts && opts.jsonSchema) {
         modelConfig.generationConfig.responseMimeType = 'application/json';
@@ -933,7 +943,9 @@ async function generateResponse(prompt, opts) {
       }
       const model = genAI.getGenerativeModel(modelConfig);
       const result = await model.generateContent(prompt);
-      console.log(`Generated response using ${modelName} (temp=${temperature}${opts && opts.jsonSchema ? ', json-schema' : ''})`);
+      const u = result.response.usageMetadata || {};
+      console.log(`Generated response using ${modelName} (temp=${temperature}${opts && opts.jsonSchema ? ', json-schema' : ''}) ` +
+        `tokens: in=${u.promptTokenCount || '?'} out=${u.candidatesTokenCount || '?'} think=${u.thoughtsTokenCount || 0} total=${u.totalTokenCount || '?'}`);
       return result.response.text();
     } catch (err) {
       console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
@@ -3156,7 +3168,10 @@ app.post('/palm', async (req, res) => {
     }
 
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
+    });
 
     const result = await model.generateContent([
       PALM_PROMPT,
