@@ -3339,21 +3339,16 @@ app.get('/admin/api/overview', async (req, res) => {
     // Subscriptions breakdown — they live at users/{uid}/subscription/current,
     // so we use a collectionGroup query. Filter to docId == 'current' to
     // avoid grabbing any historical revisions.
-    const byPlan = { trial: 0, standard: 0, premium: 0 };
+    // 'trial' plan id is shared by TWO things: the legacy ₹99 free-trial
+    // subscribers (recurring) and the new ₹49 one-time Starter Pass. They
+    // are distinguished by d.isOneTime === true (only the pass has it).
+    const byPlan = { starterPass: 0, trial: 0, standard: 0, premium: 0 };
     const byState = {
       trialing: 0, active: 0, cancelledPending: 0,
       paymentFailed: 0, expired: 0, paused: 0, other: 0,
     };
-    // Trial conversion funnel — we look at every record whose plan was
-    // 'trial' at some point, then bucket by current state.
-    // started   = ever started a trial (regardless of current state)
-    // converted = trial that successfully auto-charged ₹99 (state=active)
-    // inTrial   = still in the 7-day free window (state=trialing)
-    // cancelled = cancelled before day 7 (state=cancelledPending or expired)
-    // failed    = bank declined the day-7 debit (state=paymentFailed)
-    // Starter Pass (₹49 one-time, 7-day) — NOT a trial funnel anymore.
-    // Track passes bought vs still-active (passExpiresAt in the future) vs
-    // expired. (Plan is tagged 'trial' for plumbing compat.)
+    // Starter Pass (₹49 one-time, 7-day) — count ONLY isOneTime docs, not the
+    // legacy ₹99 trials. bought vs active-now (passExpiresAt future) vs expired.
     const pass = { bought: 0, activeNow: 0, expired: 0 };
     let subTotal = 0;
     try {
@@ -3366,9 +3361,12 @@ app.get('/admin/api/overview', async (req, res) => {
         const isPremium  = planRaw.includes('premium');
         const isStandard = planRaw.includes('standard');
         const isTrial    = planRaw.includes('trial');
+        // ₹49 one-time Starter Pass vs legacy ₹99 recurring trial.
+        const isPass     = isTrial && d.isOneTime === true;
         if (isPremium) byPlan.premium++;
         else if (isStandard) byPlan.standard++;
-        else if (isTrial) byPlan.trial++;
+        else if (isPass) byPlan.starterPass++;
+        else if (isTrial) byPlan.trial++;   // legacy ₹99 trial
         else if (byPlan[planRaw] !== undefined) byPlan[planRaw]++;
 
         // Webhook (syncSubscriptionToFirestore) writes `state` not `status`.
@@ -3377,8 +3375,9 @@ app.get('/admin/api/overview', async (req, res) => {
         if (byState[state] !== undefined) byState[state]++;
         else byState.other++;
 
-        // Starter Pass tracking — bought vs active-now vs expired.
-        if (isTrial) {
+        // Starter Pass tracking — ONLY the ₹49 one-time passes (isOneTime),
+        // never the legacy ₹99 trials.
+        if (isPass) {
           pass.bought++;
           const exp = d.passExpiresAt && d.passExpiresAt.toDate
             ? d.passExpiresAt.toDate() : null;
@@ -3768,6 +3767,9 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       rows.push({
         uid,
         plan: d.plan || d.planId || null,
+        // True only for the ₹49 one-time Starter Pass (distinguishes it from
+        // legacy ₹99 'trial' subscribers, which share the same plan id).
+        isOneTime: d.isOneTime === true,
         // The webhook writes the canonical lifecycle field `state`
         // (trialing/active/cancelledPending/expired). Older docs may
         // have `status`. Prefer state, fall back to status.
