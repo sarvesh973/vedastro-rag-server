@@ -3351,7 +3351,10 @@ app.get('/admin/api/overview', async (req, res) => {
     // inTrial   = still in the 7-day free window (state=trialing)
     // cancelled = cancelled before day 7 (state=cancelledPending or expired)
     // failed    = bank declined the day-7 debit (state=paymentFailed)
-    const trial = { started: 0, converted: 0, inTrial: 0, cancelled: 0, failed: 0 };
+    // Starter Pass (₹49 one-time, 7-day) — NOT a trial funnel anymore.
+    // Track passes bought vs still-active (passExpiresAt in the future) vs
+    // expired. (Plan is tagged 'trial' for plumbing compat.)
+    const pass = { bought: 0, activeNow: 0, expired: 0 };
     let subTotal = 0;
     try {
       const subsSnap = await firestoreDb.collectionGroup('subscription').get();
@@ -3374,26 +3377,18 @@ app.get('/admin/api/overview', async (req, res) => {
         if (byState[state] !== undefined) byState[state]++;
         else byState.other++;
 
-        // Trial funnel
+        // Starter Pass tracking — bought vs active-now vs expired.
         if (isTrial) {
-          trial.started++;
-          if (state === 'active') trial.converted++;
-          else if (state === 'trialing') trial.inTrial++;
-          else if (state === 'cancelledPending' || state === 'expired') trial.cancelled++;
-          else if (state === 'paymentFailed') trial.failed++;
+          pass.bought++;
+          const exp = d.passExpiresAt && d.passExpiresAt.toDate
+            ? d.passExpiresAt.toDate() : null;
+          if (exp && exp.getTime() > Date.now()) pass.activeNow++;
+          else pass.expired++;
         }
       });
     } catch (e) {
       console.warn('[admin/overview] subscriptions query failed:', e.message);
     }
-
-    // Conversion = converted / (eligible = started - still in trial).
-    // We exclude "still in trial" from the denominator because their fate
-    // hasn't been decided yet — otherwise the ratio drifts during testing.
-    const eligible = trial.started - trial.inTrial;
-    const conversionRate = eligible > 0
-      ? Math.round((trial.converted / eligible) * 1000) / 10
-      : null;
 
     res.json({
       counts: {
@@ -3410,10 +3405,9 @@ app.get('/admin/api/overview', async (req, res) => {
         total: subTotal,
         byPlan,
         byState,
-        trial: {
-          ...trial,
-          eligible,
-          conversionRatePct: conversionRate, // null if no eligible trials yet
+        starterPass: {
+          ...pass,
+          revenueInr: pass.bought * 49,
         },
       },
     });
