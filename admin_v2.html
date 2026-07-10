@@ -287,6 +287,32 @@
               </div>
             </div>
           </div>
+
+          <!-- ── RETENTION & UPSELL ── -->
+          <div x-show="!loading && overview" class="mt-4 p-4 rounded-lg bg-gradient-to-br from-emerald-900/30 to-slate-900 border border-emerald-800/50">
+            <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-emerald-300">
+              Retention &amp; upsell
+              <span class="text-xs text-slate-400 normal-case ml-2">(from real Razorpay payments)</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                <div class="text-xs text-slate-400 uppercase tracking-wide">₹49 pass buyers</div>
+                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.retention?.passBuyers ?? 0"></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-emerald-900/50">
+                <div class="text-xs text-emerald-300 uppercase tracking-wide">Bought ₹49 again</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-emerald-300" x-text="overview?.subscriptions?.retention?.repeatPassBuyers ?? 0"></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-sky-900/50">
+                <div class="text-xs text-sky-300 uppercase tracking-wide">Upgraded → Standard</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-sky-300" x-text="overview?.subscriptions?.retention?.upgradedStandard ?? 0"></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-purple-900/50">
+                <div class="text-xs text-purple-300 uppercase tracking-wide">Upgraded → Premium</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-purple-200" x-text="overview?.subscriptions?.retention?.upgradedPremium ?? 0"></div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- ── AI REPORTS ── -->

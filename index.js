@@ -3389,6 +3389,42 @@ app.get('/admin/api/overview', async (req, res) => {
       console.warn('[admin/overview] subscriptions query failed:', e.message);
     }
 
+    // ── Retention / upsell from REAL Razorpay payment history ──
+    // Payments live at users/{uid}/payments/{paymentId} with { plan, status }.
+    // These are genuine charges — independent of any SDK/ad events, so they
+    // can't be polluted by test/ad events.
+    //   • repeatPassBuyers = bought the ₹49 pass 2+ times (came back)
+    //   • upgradedStandard/Premium = a pass buyer who later also bought a
+    //     recurring plan.
+    const retention = {
+      passBuyers: 0, repeatPassBuyers: 0, upgradedStandard: 0, upgradedPremium: 0,
+    };
+    try {
+      const paySnap = await firestoreDb.collectionGroup('payments').get();
+      const byUser = new Map(); // uid -> { trial, standard, premium }
+      paySnap.forEach(doc => {
+        const d = doc.data() || {};
+        if (d.status && d.status !== 'success') return;
+        const uid = doc.ref.parent && doc.ref.parent.parent
+          ? doc.ref.parent.parent.id : null;
+        if (!uid) return;
+        const plan = String(d.plan || '').toLowerCase();
+        if (!byUser.has(uid)) byUser.set(uid, { trial: 0, standard: 0, premium: 0 });
+        const u = byUser.get(uid);
+        if (plan.includes('premium')) u.premium++;
+        else if (plan.includes('standard')) u.standard++;
+        else if (plan.includes('trial')) u.trial++;
+      });
+      byUser.forEach(u => {
+        if (u.trial >= 1) retention.passBuyers++;
+        if (u.trial >= 2) retention.repeatPassBuyers++;
+        if (u.trial >= 1 && u.standard >= 1) retention.upgradedStandard++;
+        if (u.trial >= 1 && u.premium >= 1) retention.upgradedPremium++;
+      });
+    } catch (e) {
+      console.warn('[admin/overview] payments query failed:', e.message);
+    }
+
     res.json({
       counts: {
         users: usersAgg.data().count,
@@ -3408,6 +3444,7 @@ app.get('/admin/api/overview', async (req, res) => {
           ...pass,
           revenueInr: pass.bought * 49,
         },
+        retention,
       },
     });
   } catch (e) {
