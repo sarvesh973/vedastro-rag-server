@@ -205,10 +205,10 @@ const RATE_LIMITS = {
   // see the lifetime check in the /chat handler. The value here is the
   // daily backstop.
   free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5 },
-  // 'trial' is now the one-time ₹49 Starter Pass: 5 chats/DAY for 7 days,
+  // 'trial' is now the one-time ₹49 Starter Pass: 3 chats/DAY for 7 days,
   // NO palm. (Enum name kept for plumbing compat; it is not a free trial.)
-  trial:       { chat: 5,   palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
-  standard:    { chat: 30,  palm: 5,  horoscope: 100, chart: 100, search: 200, insight: 60 },
+  trial:       { chat: 3,   palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
+  standard:    { chat: 10,  palm: 5,  horoscope: 100, chart: 100, search: 200, insight: 60 },
   premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500, insight: 200 },
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0,   insight: 0 },
 };
