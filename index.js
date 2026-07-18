@@ -201,15 +201,19 @@ const RATE_LIMITS = {
   // day, because the screen auto-fires /chat to generate the readings.
   // Separated into its own quota so users can BROWSE their chart freely
   // without losing their ability to actually chat.
-  // free.chat is enforced as a LIFETIME total (1 chat ever), not per-day —
-  // see the lifetime check in the /chat handler. The value here is the
-  // daily backstop.
+  // IMPORTANT: `chat` and `palm` are enforced PER CALENDAR MONTH (subscription
+  // allowance); horoscope/chart/search/insight are PER DAY (abuse caps). The
+  // period split is handled in rateLimit() via MONTHLY_ACTIONS.
+  //
+  // free.chat is additionally capped LIFETIME (1 chat ever) by the check in
+  // the /chat handler; the value here is a monthly backstop.
+  //   trial    = ₹199/mo  → 35 chats/mo,  2 palm/mo
+  //   standard = ₹499/mo  → 100 chats/mo, 5 palm/mo
+  //   premium  = ₹999/mo  → unlimited chats + unlimited palm
   free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5 },
-  // 'trial' is now the one-time ₹49 Starter Pass: 3 chats/DAY for 7 days,
-  // NO palm. (Enum name kept for plumbing compat; it is not a free trial.)
-  trial:       { chat: 3,   palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
-  standard:    { chat: 10,  palm: 5,  horoscope: 100, chart: 100, search: 200, insight: 60 },
-  premium:     { chat: 500, palm: 50, horoscope: 500, chart: 200, search: 500, insight: 200 },
+  trial:       { chat: 35,  palm: 2,  horoscope: 100, chart: 100, search: 200, insight: 60 },
+  standard:    { chat: 100, palm: 5,  horoscope: 200, chart: 150, search: 300, insight: 100 },
+  premium:     { chat: -1,  palm: -1, horoscope: 500, chart: 200, search: 500, insight: 200 },
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0,   insight: 0 },
 };
 
@@ -246,8 +250,16 @@ async function rateLimit(auth, action, res) {
     return false;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
+  // chat + palm are MONTHLY allowances (subscription); everything else is
+  // daily. Monthly actions use a yyyy-mm key + ~40-day TTL so the counter
+  // survives the whole month; daily actions keep the yyyy-mm-dd key + 48h TTL.
+  const MONTHLY_ACTIONS = new Set(['chat', 'palm']);
+  const isMonthly = MONTHLY_ACTIONS.has(action);
+  const period = isMonthly
+    ? new Date().toISOString().slice(0, 7)   // yyyy-mm
+    : new Date().toISOString().slice(0, 10); // yyyy-mm-dd
+  const ttlMs = isMonthly ? 40 * 24 * 60 * 60 * 1000 : 48 * 60 * 60 * 1000;
+  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${period}`);
   try {
     let observedUsedBefore = null;
     let observedDocExisted = null;
@@ -262,8 +274,8 @@ async function rateLimit(auth, action, res) {
         ...data,
         [action]: used + 1,
         updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
-        // 48h TTL — Firestore TTL policy on `expiresAt` deletes it
-        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        // Firestore TTL policy on `expiresAt` deletes the doc.
+        expiresAt: new Date(Date.now() + ttlMs),
       }, { merge: true });
       return { allowed: true, used: used + 1, limit };
     });
@@ -319,8 +331,13 @@ async function rateLimit(auth, action, res) {
 async function rollbackRateLimit(auth, action) {
   if (!auth || auth.isAdmin) return;
   if (!firestoreDb) return;
-  const today = new Date().toISOString().slice(0, 10);
-  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${today}`);
+  // Must target the SAME period key rateLimit() used: monthly for chat/palm,
+  // daily otherwise — otherwise a failed chat wouldn't refund the slot.
+  const isMonthly = action === 'chat' || action === 'palm';
+  const period = isMonthly
+    ? new Date().toISOString().slice(0, 7)
+    : new Date().toISOString().slice(0, 10);
+  const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${period}`);
   try {
     await firestoreDb.runTransaction(async (tx) => {
       const doc = await tx.get(ref);
@@ -2147,15 +2164,10 @@ app.post('/subscription/create', async (req, res) => {
       });
     }
 
-    // The Starter Pass ('trial') is now a ONE-TIME ₹49 order, not a
-    // recurring subscription — it must go through /order/create, not here.
-    if (plan === 'trial') {
-      return res.status(400).json({
-        error: 'The Starter Pass is a one-time purchase. Use /order/create.',
-      });
-    }
+    // All three paid tiers (trial=₹199, standard=₹499, premium=₹999) are
+    // recurring subscriptions and go through here.
     if (!plan || !VALID_PLAN_IDS[plan]) {
-      return res.status(400).json({ error: 'Invalid plan. Use standard or premium.' });
+      return res.status(400).json({ error: 'Invalid plan. Use trial, standard, or premium.' });
     }
 
     if (!isRazorpayConfigured) {
@@ -2200,12 +2212,8 @@ app.post('/subscription/create', async (req, res) => {
       },
     };
 
-    if (plan === 'trial') {
-      const trialDays = 7;
-      const startAt = Math.floor(Date.now() / 1000) + (trialDays * 24 * 60 * 60);
-      subscriptionParams.start_at = startAt;
-      subscriptionParams.notes.trialEndsAt = new Date(startAt * 1000).toISOString();
-    }
+    // No free trial anymore — all three tiers charge the first month
+    // immediately (no start_at delay).
 
     const subscription = await rzp.subscriptions.create(subscriptionParams);
 
@@ -2478,19 +2486,17 @@ async function syncSubscriptionToFirestore(event) {
     // the mandate was correctly set up with the bank.
     case 'subscription.authenticated':
     case 'subscription.activated': {
-      const isTrial = plan === 'trial' || !!notes.trialEndsAt;
+      // No free trial anymore — every plan (trial=₹199 included) charges
+      // immediately, so activation means 'active', never 'trialing'.
       const update = {
         plan,
-        state: isTrial ? 'trialing' : 'active',
+        state: 'active',
         razorpaySubscriptionId: subEntity.id,
         activatedAt: now,
         updatedAt: now,
       };
       if (subEntity.current_end) {
         update.currentPeriodEndsAt = new Date(subEntity.current_end * 1000);
-      }
-      if (notes.trialEndsAt) {
-        update.trialEndsAt = new Date(notes.trialEndsAt);
       }
       await subRef.set(update, { merge: true });
       await userRef.set({ isPremium: true, plan }, { merge: true });
