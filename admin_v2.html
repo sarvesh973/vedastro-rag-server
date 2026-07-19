@@ -244,7 +244,7 @@
               <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
               <template x-for="(count, plan) in overview?.subscriptions?.byPlan || {}" :key="plan">
                 <div class="flex justify-between py-1.5 border-b border-slate-800 last:border-0">
-                  <span class="capitalize" x-text="plan === 'starterPass' ? 'Starter Pass ₹49' : (plan === 'trial' ? 'Trial (₹99 legacy)' : plan)"></span>
+                  <span x-text="({starterPass:'Starter Pass ₹49 (old)',trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[plan] || plan)"></span>
                   <span class="font-mono text-purple-300" x-text="count"></span>
                 </div>
               </template>
@@ -262,28 +262,28 @@
             </div>
           </div>
 
-          <!-- ── ₹49 STARTER PASS ── -->
+          <!-- ── MONTHLY RECURRING REVENUE ── -->
           <div x-show="!loading && overview" class="mt-4 p-4 rounded-lg bg-gradient-to-br from-purple-900/40 to-slate-900 border border-purple-800/50">
             <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-purple-300">
-              ₹49 Starter Pass
-              <span class="text-xs text-slate-400 normal-case ml-2">(one-time · 5 chats/day · 7 days · no auto-renewal)</span>
+              Monthly recurring revenue
+              <span class="text-xs text-slate-400 normal-case ml-2">(active subscriptions · ₹199 / ₹499 / ₹999)</span>
             </div>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                <div class="text-xs text-slate-400 uppercase tracking-wide">Passes bought</div>
-                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.starterPass?.bought ?? 0"></div>
+                <div class="text-xs text-slate-400 uppercase tracking-wide">₹199 active</div>
+                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.mrr?.t199 ?? 0"></div>
               </div>
-              <div class="p-3 rounded-lg bg-slate-950/60 border border-emerald-900/50">
-                <div class="text-xs text-emerald-300 uppercase tracking-wide">Active now</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-emerald-300" x-text="overview?.subscriptions?.starterPass?.activeNow ?? 0"></div>
-              </div>
-              <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                <div class="text-xs text-slate-400 uppercase tracking-wide">Expired</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-slate-300" x-text="overview?.subscriptions?.starterPass?.expired ?? 0"></div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-sky-900/50">
+                <div class="text-xs text-sky-300 uppercase tracking-wide">₹499 active</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-sky-300" x-text="overview?.subscriptions?.mrr?.t499 ?? 0"></div>
               </div>
               <div class="p-3 rounded-lg bg-slate-950/60 border border-purple-900/50">
-                <div class="text-xs text-purple-300 uppercase tracking-wide">Revenue</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-purple-200">₹<span x-text="overview?.subscriptions?.starterPass?.revenueInr ?? 0"></span></div>
+                <div class="text-xs text-purple-300 uppercase tracking-wide">₹999 active</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-purple-200" x-text="overview?.subscriptions?.mrr?.t999 ?? 0"></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-emerald-900/50">
+                <div class="text-xs text-emerald-300 uppercase tracking-wide">MRR / month</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-emerald-300">₹<span x-text="overview?.subscriptions?.mrr?.monthlyInr ?? 0"></span></div>
               </div>
             </div>
           </div>
@@ -296,20 +296,20 @@
             </div>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                <div class="text-xs text-slate-400 uppercase tracking-wide">₹49 pass buyers</div>
-                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.retention?.passBuyers ?? 0"></div>
+                <div class="text-xs text-slate-400 uppercase tracking-wide">₹199 subscribers</div>
+                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.retention?.entryBuyers ?? 0"></div>
               </div>
               <div class="p-3 rounded-lg bg-slate-950/60 border border-emerald-900/50">
-                <div class="text-xs text-emerald-300 uppercase tracking-wide">Bought ₹49 again</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-emerald-300" x-text="overview?.subscriptions?.retention?.repeatPassBuyers ?? 0"></div>
+                <div class="text-xs text-emerald-300 uppercase tracking-wide">Resubscribed</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-emerald-300" x-text="overview?.subscriptions?.retention?.resubscribed ?? 0"></div>
               </div>
               <div class="p-3 rounded-lg bg-slate-950/60 border border-sky-900/50">
-                <div class="text-xs text-sky-300 uppercase tracking-wide">Upgraded → Standard</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-sky-300" x-text="overview?.subscriptions?.retention?.upgradedStandard ?? 0"></div>
+                <div class="text-xs text-sky-300 uppercase tracking-wide">Upgraded → ₹499</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-sky-300" x-text="overview?.subscriptions?.retention?.upgradedTo499 ?? 0"></div>
               </div>
               <div class="p-3 rounded-lg bg-slate-950/60 border border-purple-900/50">
-                <div class="text-xs text-purple-300 uppercase tracking-wide">Upgraded → Premium</div>
-                <div class="text-2xl font-mono font-semibold mt-1 text-purple-200" x-text="overview?.subscriptions?.retention?.upgradedPremium ?? 0"></div>
+                <div class="text-xs text-purple-300 uppercase tracking-wide">Upgraded → ₹999</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-purple-200" x-text="overview?.subscriptions?.retention?.upgradedTo999 ?? 0"></div>
               </div>
             </div>
           </div>
@@ -478,7 +478,7 @@
                       <div class="text-xs text-slate-500 font-mono" x-text="s.razorpaySubscriptionId || s.uid.slice(0, 16)"></div>
                     </td>
                     <td class="px-3 py-2">
-                      <span class="text-xs font-mono text-purple-300" x-text="s.isOneTime ? 'Starter Pass ₹49' : (s.plan || '—')"></span>
+                      <span class="text-xs font-mono text-purple-300" x-text="({trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[s.plan] || s.plan || '—')"></span>
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
@@ -662,7 +662,7 @@
             <div class="grid grid-cols-2 gap-4 text-sm mb-4">
               <div><span class="text-slate-500">UID:</span> <span class="font-mono text-xs" x-text="lookupResult?.uid"></span></div>
               <div><span class="text-slate-500">Phone:</span> <span x-text="lookupResult?.phoneNumber || '—'"></span></div>
-              <div><span class="text-slate-500">Plan tag:</span> <span x-text="lookupResult?.subscription?.isOneTime ? 'Starter Pass ₹49' : (lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan || '—')"></span></div>
+              <div><span class="text-slate-500">Plan tag:</span> <span x-text="(function(p){return ({trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[p] || p || '—')})(lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan)"></span></div>
               <div><span class="text-slate-500">Sub status:</span> <span x-text="lookupResult?.subscription?.status || '—'"></span></div>
               <div><span class="text-slate-500">Chats used:</span> <span x-text="lookupResult?.usage?.chatUsedThisCycle ?? '—'"></span></div>
               <div><span class="text-slate-500">Palm used:</span> <span x-text="lookupResult?.usage?.palmUsedThisCycle ?? '—'"></span></div>
