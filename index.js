@@ -3353,9 +3353,11 @@ app.get('/admin/api/overview', async (req, res) => {
       trialing: 0, active: 0, cancelledPending: 0,
       paymentFailed: 0, expired: 0, paused: 0, other: 0,
     };
-    // Starter Pass (₹49 one-time, 7-day) — count ONLY isOneTime docs, not the
-    // legacy ₹99 trials. bought vs active-now (passExpiresAt future) vs expired.
-    const pass = { bought: 0, activeNow: 0, expired: 0 };
+    // MRR (monthly recurring revenue) from ACTIVE subscriptions per tier.
+    // Tiers: trial=₹199, standard=₹499, premium=₹999. (Legacy ₹49 one-time
+    // passes are excluded — they're not recurring.)
+    const mrr = { t199: 0, t499: 0, t999: 0 };
+    const activeSubStates = new Set(['active', 'trialing', 'cancelledPending']);
     let subTotal = 0;
     try {
       const subsSnap = await firestoreDb.collectionGroup('subscription').get();
@@ -3381,14 +3383,11 @@ app.get('/admin/api/overview', async (req, res) => {
         if (byState[state] !== undefined) byState[state]++;
         else byState.other++;
 
-        // Starter Pass tracking — ONLY the ₹49 one-time passes (isOneTime),
-        // never the legacy ₹99 trials.
-        if (isPass) {
-          pass.bought++;
-          const exp = d.passExpiresAt && d.passExpiresAt.toDate
-            ? d.passExpiresAt.toDate() : null;
-          if (exp && exp.getTime() > Date.now()) pass.activeNow++;
-          else pass.expired++;
+        // MRR — count active recurring subs per tier (skip one-time passes).
+        if (activeSubStates.has(state) && !isPass) {
+          if (isPremium) mrr.t999++;        // premium plan = ₹999
+          else if (isStandard) mrr.t499++;  // standard plan = ₹499
+          else if (isTrial) mrr.t199++;     // trial plan = ₹199
         }
       });
     } catch (e) {
@@ -3399,11 +3398,12 @@ app.get('/admin/api/overview', async (req, res) => {
     // Payments live at users/{uid}/payments/{paymentId} with { plan, status }.
     // These are genuine charges — independent of any SDK/ad events, so they
     // can't be polluted by test/ad events.
-    //   • repeatPassBuyers = bought the ₹49 pass 2+ times (came back)
-    //   • upgradedStandard/Premium = a pass buyer who later also bought a
-    //     recurring plan.
+    //   • entryBuyers   = bought the ₹199 entry tier
+    //   • resubscribed  = bought the ₹199 tier 2+ times
+    //   • upgradedTo499 = ₹199 buyer who also bought ₹499
+    //   • upgradedTo999 = ₹199 buyer who also bought ₹999
     const retention = {
-      passBuyers: 0, repeatPassBuyers: 0, upgradedStandard: 0, upgradedPremium: 0,
+      entryBuyers: 0, resubscribed: 0, upgradedTo499: 0, upgradedTo999: 0,
     };
     try {
       const paySnap = await firestoreDb.collectionGroup('payments').get();
@@ -3422,10 +3422,10 @@ app.get('/admin/api/overview', async (req, res) => {
         else if (plan.includes('trial')) u.trial++;
       });
       byUser.forEach(u => {
-        if (u.trial >= 1) retention.passBuyers++;
-        if (u.trial >= 2) retention.repeatPassBuyers++;
-        if (u.trial >= 1 && u.standard >= 1) retention.upgradedStandard++;
-        if (u.trial >= 1 && u.premium >= 1) retention.upgradedPremium++;
+        if (u.trial >= 1) retention.entryBuyers++;
+        if (u.trial >= 2) retention.resubscribed++;
+        if (u.trial >= 1 && u.standard >= 1) retention.upgradedTo499++;
+        if (u.trial >= 1 && u.premium >= 1) retention.upgradedTo999++;
       });
     } catch (e) {
       console.warn('[admin/overview] payments query failed:', e.message);
@@ -3446,9 +3446,9 @@ app.get('/admin/api/overview', async (req, res) => {
         total: subTotal,
         byPlan,
         byState,
-        starterPass: {
-          ...pass,
-          revenueInr: pass.bought * 49,
+        mrr: {
+          ...mrr,
+          monthlyInr: mrr.t199 * 199 + mrr.t499 * 499 + mrr.t999 * 999,
         },
         retention,
       },
