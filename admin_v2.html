@@ -244,7 +244,7 @@
               <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-slate-400">Subscriptions by plan</div>
               <template x-for="(count, plan) in overview?.subscriptions?.byPlan || {}" :key="plan">
                 <div class="flex justify-between py-1.5 border-b border-slate-800 last:border-0">
-                  <span x-text="({starterPass:'Starter Pass ₹49 (old)',trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[plan] || plan)"></span>
+                  <span x-text="({weeklyPass:'Starter Pass ₹79/wk',starterPass:'Starter Pass ₹49 (old)',trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[plan] || plan)"></span>
                   <span class="font-mono text-purple-300" x-text="count"></span>
                 </div>
               </template>
@@ -478,7 +478,7 @@
                       <div class="text-xs text-slate-500 font-mono" x-text="s.razorpaySubscriptionId || s.uid.slice(0, 16)"></div>
                     </td>
                     <td class="px-3 py-2">
-                      <span class="text-xs font-mono text-purple-300" x-text="({trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[s.plan] || s.plan || '—')"></span>
+                      <span class="text-xs font-mono text-purple-300" x-text="({pass:'Starter Pass ₹79/wk',trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[s.plan] || s.plan || '—')"></span>
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
@@ -662,7 +662,7 @@
             <div class="grid grid-cols-2 gap-4 text-sm mb-4">
               <div><span class="text-slate-500">UID:</span> <span class="font-mono text-xs" x-text="lookupResult?.uid"></span></div>
               <div><span class="text-slate-500">Phone:</span> <span x-text="lookupResult?.phoneNumber || '—'"></span></div>
-              <div><span class="text-slate-500">Plan tag:</span> <span x-text="(function(p){return ({trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[p] || p || '—')})(lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan)"></span></div>
+              <div><span class="text-slate-500">Plan tag:</span> <span x-text="(function(p){return ({pass:'Starter Pass ₹79/wk',trial:'Standard ₹199',standard:'Premium ₹499',premium:'Unlimited ₹999'}[p] || p || '—')})(lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan)"></span></div>
               <div><span class="text-slate-500">Sub status:</span> <span x-text="lookupResult?.subscription?.status || '—'"></span></div>
               <div><span class="text-slate-500">Chats used:</span> <span x-text="lookupResult?.usage?.chatUsedThisCycle ?? '—'"></span></div>
               <div><span class="text-slate-500">Palm used:</span> <span x-text="lookupResult?.usage?.palmUsedThisCycle ?? '—'"></span></div>

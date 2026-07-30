@@ -211,6 +211,9 @@ const RATE_LIMITS = {
   //   standard = ₹499/mo  → 100 chats/mo, 5 palm/mo
   //   premium  = ₹999/mo  → unlimited chats + unlimited palm
   free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5 },
+  // pass = ₹79/WEEK front-door: 21 chats/WEEK, 0 palm. chat resets weekly
+  // (see rateLimit() — 'pass' plan uses a weekly period key).
+  pass:        { chat: 21,  palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
   trial:       { chat: 35,  palm: 2,  horoscope: 100, chart: 100, search: 200, insight: 60 },
   standard:    { chat: 100, palm: 5,  horoscope: 200, chart: 150, search: 300, insight: 100 },
   premium:     { chat: -1,  palm: -1, horoscope: 500, chart: 200, search: 500, insight: 200 },
@@ -239,6 +242,21 @@ function isKundliInsightPrompt(question) {
   return INSIGHT_PROMPT_FINGERPRINTS.some(re => re.test(question));
 }
 
+// Rate-limit bucket period + TTL for an action/plan.
+//   chat/palm → WEEKLY for the ₹79 'pass' plan, MONTHLY for other paid tiers.
+//   everything else → DAILY.
+function rateLimitPeriod(action, plan) {
+  const isAllowance = action === 'chat' || action === 'palm';
+  if (isAllowance && plan === 'pass') {
+    const weekIndex = Math.floor(Date.now() / (7 * 24 * 60 * 60 * 1000));
+    return { period: `w${weekIndex}`, ttlMs: 10 * 24 * 60 * 60 * 1000 };
+  }
+  if (isAllowance) {
+    return { period: new Date().toISOString().slice(0, 7), ttlMs: 40 * 24 * 60 * 60 * 1000 };
+  }
+  return { period: new Date().toISOString().slice(0, 10), ttlMs: 48 * 60 * 60 * 1000 };
+}
+
 async function rateLimit(auth, action, res) {
   if (!auth || auth.isAdmin) return true;          // Admins skip
   if (!firestoreDb) return true;                    // Fail open if Firestore not configured
@@ -250,15 +268,12 @@ async function rateLimit(auth, action, res) {
     return false;
   }
 
-  // chat + palm are MONTHLY allowances (subscription); everything else is
-  // daily. Monthly actions use a yyyy-mm key + ~40-day TTL so the counter
-  // survives the whole month; daily actions keep the yyyy-mm-dd key + 48h TTL.
-  const MONTHLY_ACTIONS = new Set(['chat', 'palm']);
-  const isMonthly = MONTHLY_ACTIONS.has(action);
-  const period = isMonthly
-    ? new Date().toISOString().slice(0, 7)   // yyyy-mm
-    : new Date().toISOString().slice(0, 10); // yyyy-mm-dd
-  const ttlMs = isMonthly ? 40 * 24 * 60 * 60 * 1000 : 48 * 60 * 60 * 1000;
+  // chat + palm are subscription allowances: WEEKLY for the ₹79 'pass' plan,
+  // MONTHLY for trial/standard/premium. Everything else is DAILY.
+  //   weekly  → key `w{weekIndex}` (+10-day TTL)
+  //   monthly → key `yyyy-mm`      (+40-day TTL)
+  //   daily   → key `yyyy-mm-dd`   (+48h TTL)
+  const { period, ttlMs } = rateLimitPeriod(action, auth.plan);
   const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${period}`);
   try {
     let observedUsedBefore = null;
@@ -331,12 +346,10 @@ async function rateLimit(auth, action, res) {
 async function rollbackRateLimit(auth, action) {
   if (!auth || auth.isAdmin) return;
   if (!firestoreDb) return;
-  // Must target the SAME period key rateLimit() used: monthly for chat/palm,
-  // daily otherwise — otherwise a failed chat wouldn't refund the slot.
-  const isMonthly = action === 'chat' || action === 'palm';
-  const period = isMonthly
-    ? new Date().toISOString().slice(0, 7)
-    : new Date().toISOString().slice(0, 10);
+  // Must target the SAME period key rateLimit() used (weekly for pass,
+  // monthly for other paid tiers, daily otherwise) — else a failed chat
+  // wouldn't refund the slot.
+  const { period } = rateLimitPeriod(action, auth.plan);
   const ref = firestoreDb.doc(`rate_limits/${auth.uid}_${period}`);
   try {
     await firestoreDb.runTransaction(async (tx) => {
@@ -434,6 +447,7 @@ async function requireAdmin(req, res) {
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+const RAZORPAY_PLAN_PASS = process.env.RAZORPAY_PLAN_PASS || 'plan_pass_79_weekly_placeholder';
 const RAZORPAY_PLAN_TRIAL = process.env.RAZORPAY_PLAN_TRIAL || 'plan_trial_99_placeholder';
 const RAZORPAY_PLAN_STANDARD = process.env.RAZORPAY_PLAN_STANDARD || 'plan_standard_199_placeholder';
 const RAZORPAY_PLAN_PREMIUM = process.env.RAZORPAY_PLAN_PREMIUM || 'plan_premium_499_placeholder';
@@ -2127,6 +2141,7 @@ app.get('/', (req, res) => {
 //      with the same secret as RAZORPAY_WEBHOOK_SECRET
 
 const VALID_PLAN_IDS = {
+  pass: () => RAZORPAY_PLAN_PASS,
   trial: () => RAZORPAY_PLAN_TRIAL,
   standard: () => RAZORPAY_PLAN_STANDARD,
   premium: () => RAZORPAY_PLAN_PREMIUM,
@@ -3348,7 +3363,7 @@ app.get('/admin/api/overview', async (req, res) => {
     // 'trial' plan id is shared by TWO things: the legacy ₹99 free-trial
     // subscribers (recurring) and the new ₹49 one-time Starter Pass. They
     // are distinguished by d.isOneTime === true (only the pass has it).
-    const byPlan = { starterPass: 0, trial: 0, standard: 0, premium: 0 };
+    const byPlan = { weeklyPass: 0, starterPass: 0, trial: 0, standard: 0, premium: 0 };
     const byState = {
       trialing: 0, active: 0, cancelledPending: 0,
       paymentFailed: 0, expired: 0, paused: 0, other: 0,
@@ -3371,7 +3386,9 @@ app.get('/admin/api/overview', async (req, res) => {
         const isTrial    = planRaw.includes('trial');
         // ₹49 one-time Starter Pass vs legacy ₹99 recurring trial.
         const isPass     = isTrial && d.isOneTime === true;
-        if (isPremium) byPlan.premium++;
+        const isWeeklyPass = planRaw === 'pass';   // ₹79/week front-door
+        if (isWeeklyPass) byPlan.weeklyPass++;
+        else if (isPremium) byPlan.premium++;
         else if (isStandard) byPlan.standard++;
         else if (isPass) byPlan.starterPass++;
         else if (isTrial) byPlan.trial++;   // legacy ₹99 trial
