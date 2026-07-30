@@ -2217,7 +2217,11 @@ app.post('/subscription/create', async (req, res) => {
     // Standard / Premium: charges immediately (no start_at).
     const subscriptionParams = {
       plan_id: planId,
-      total_count: 12,             // 12 monthly cycles before forced renewal prompt
+      // Number of billing cycles before Razorpay auto-completes the sub.
+      // The ₹79 'pass' bills WEEKLY, so 12 would end it after ~3 months —
+      // use 156 (~3 years of weekly) so it recurs long-term. Monthly tiers
+      // use 12 (= 1 year).
+      total_count: plan === 'pass' ? 156 : 12,
       customer_notify: 1,           // Razorpay sends pre-debit SMS/email automatically (CCPA compliance)
       notes: {
         userId: userId || '',
