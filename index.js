@@ -214,7 +214,7 @@ const RATE_LIMITS = {
   // pass = ₹79/WEEK front-door: 21 chats/WEEK, 0 palm. chat resets weekly
   // (see rateLimit() — 'pass' plan uses a weekly period key).
   pass:        { chat: 21,  palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30 },
-  trial:       { chat: 35,  palm: 2,  horoscope: 100, chart: 100, search: 200, insight: 60 },
+  trial:       { chat: 50,  palm: 2,  horoscope: 100, chart: 100, search: 200, insight: 60 },
   standard:    { chat: 100, palm: 5,  horoscope: 200, chart: 150, search: 300, insight: 100 },
   premium:     { chat: -1,  palm: -1, horoscope: 500, chart: 200, search: 500, insight: 200 },
   anonymous:   { chat: 0,   palm: 0,  horoscope: 0,   chart: 0,   search: 0,   insight: 0 },
