@@ -4670,9 +4670,35 @@ function keepAlive() {
 // --- MULANK (Ank Jyotish) feature: profile / reading / ask routes ---
 // Deterministic engine + daily-cached LLM readings. Cost ceiling ≈ 9
 // generations per period per language regardless of user count.
-require('./lib/mulank-routes').registerMulankRoutes(app, {
+const mulankRoutes = require('./lib/mulank-routes');
+mulankRoutes.registerMulankRoutes(app, {
   verifyAuth, rateLimit, firestoreDb, firebaseAdmin, generateResponse,
 });
+
+// Pre-warm the 9 mulank readings each morning so the first user never
+// waits and the cache is always fresh. Languages via MULANK_LANGS env
+// (comma-separated), default 'en,hinglish'. Cost ≤ 9 × langs per period.
+const MULANK_LANGS = (process.env.MULANK_LANGS || 'en,hinglish')
+  .split(',').map(s => s.trim()).filter(Boolean);
+function startMulankCron() {
+  const cron = require('node-cron');
+  const tz = 'Asia/Kolkata';
+  const deps = { firestoreDb, firebaseAdmin, generateResponse };
+  const run = (periods) => mulankRoutes
+    .preGenerateMulank(deps, { periods, languages: MULANK_LANGS })
+    .catch(err => console.error('[MULANK CRON] error:', err.message));
+
+  // Post-boot warmup (staggered 60s after horoscope's 30s fill).
+  setTimeout(() => {
+    console.log('[MULANK CRON] post-boot fill (daily+weekly+monthly)');
+    run(['daily', 'weekly', 'monthly']);
+  }, 60000);
+
+  cron.schedule('10 0 * * *', () => run(['daily']), { timezone: tz });   // 00:10 IST daily
+  cron.schedule('10 0 * * 1', () => run(['weekly']), { timezone: tz });  // Mon 00:10 IST
+  cron.schedule('10 0 1 * *', () => run(['monthly']), { timezone: tz }); // 1st 00:10 IST
+  console.log(`[MULANK CRON] scheduled (IST) langs=${MULANK_LANGS.join(',')}`);
+}
 
 // --- START ---
 app.listen(PORT, () => {
@@ -4681,4 +4707,5 @@ app.listen(PORT, () => {
   keepAlive();
   startHoroscopeCron(); // Pre-generate horoscopes for all 12 signs
   console.log('[CRON] Horoscope pre-generation cron started (every 6 hours)');
+  startMulankCron(); // Pre-warm the 9 mulank readings each morning
 });
