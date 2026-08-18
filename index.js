@@ -4667,6 +4667,13 @@ function keepAlive() {
   }, 14 * 60 * 1000);
 }
 
+// --- MULANK (Ank Jyotish) feature: profile / reading / ask routes ---
+// Deterministic engine + daily-cached LLM readings. Cost ceiling ≈ 9
+// generations per period per language regardless of user count.
+require('./lib/mulank-routes').registerMulankRoutes(app, {
+  verifyAuth, rateLimit, firestoreDb, firebaseAdmin, generateResponse,
+});
+
 // --- START ---
 app.listen(PORT, () => {
   console.log(`VedAstro AI server v3.0 running on port ${PORT}`);
