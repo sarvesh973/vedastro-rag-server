@@ -979,7 +979,15 @@ async function generateResponse(prompt, opts) {
         `tokens: in=${u.promptTokenCount || '?'} out=${u.candidatesTokenCount || '?'} think=${u.thoughtsTokenCount || 0} total=${u.totalTokenCount || '?'}`);
       return result.response.text();
     } catch (err) {
-      console.log(`${modelName} failed: ${err.message?.substring(0, 80)}`);
+      // Keep enough of the error to actually diagnose it. The old 80-char
+      // cap was shorter than the endpoint URL the SDK puts in the message,
+      // so every failure logged as an anonymous "Error fetching from
+      // https://generativelanguage.googl" — the status code and reason,
+      // the only useful parts, were always truncated away. That made the
+      // fallback path silent about WHY the primary model keeps failing.
+      const status = [err.status, err.statusText].filter(Boolean).join(' ');
+      const msg = String(err.message || err).replace(/\s+/g, ' ').slice(0, 300);
+      console.log(`${modelName} failed:${status ? ` [${status}]` : ''} ${msg}`);
       if (modelName === models[models.length - 1]) throw err;
     }
   }
