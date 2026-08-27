@@ -211,7 +211,7 @@ const RATE_LIMITS = {
   //   standard = ₹499/mo  → 100 chats/mo, 5 palm/mo
   //   premium  = ₹999/mo  → unlimited chats + unlimited palm
   free:        { chat: 1,   palm: 0,  horoscope: 30,  chart: 10,  search: 20,  insight: 5, mulank_gen: 5 },
-  // pass = ₹79/WEEK front-door: 21 chats/WEEK, 0 palm. chat resets weekly
+  // pass = ₹49/WEEK front-door: 21 chats/WEEK, 0 palm. chat resets weekly
   // (see rateLimit() — 'pass' plan uses a weekly period key).
   pass:        { chat: 21,  palm: 0,  horoscope: 60,  chart: 60,  search: 100, insight: 30, mulank_gen: 10 },
   trial:       { chat: 50,  palm: 2,  horoscope: 100, chart: 100, search: 200, insight: 60, mulank_gen: 20 },
@@ -243,7 +243,7 @@ function isKundliInsightPrompt(question) {
 }
 
 // Rate-limit bucket period + TTL for an action/plan.
-//   chat/palm → WEEKLY for the ₹79 'pass' plan, MONTHLY for other paid tiers.
+//   chat/palm → WEEKLY for the ₹49 'pass' plan, MONTHLY for other paid tiers.
 //   everything else → DAILY.
 function rateLimitPeriod(action, plan) {
   const isAllowance = action === 'chat' || action === 'palm';
@@ -268,7 +268,7 @@ async function rateLimit(auth, action, res) {
     return false;
   }
 
-  // chat + palm are subscription allowances: WEEKLY for the ₹79 'pass' plan,
+  // chat + palm are subscription allowances: WEEKLY for the ₹49 'pass' plan,
   // MONTHLY for trial/standard/premium. Everything else is DAILY.
   //   weekly  → key `w{weekIndex}` (+10-day TTL)
   //   monthly → key `yyyy-mm`      (+40-day TTL)
@@ -447,7 +447,7 @@ async function requireAdmin(req, res) {
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
-const RAZORPAY_PLAN_PASS = process.env.RAZORPAY_PLAN_PASS || 'plan_pass_79_weekly_placeholder';
+const RAZORPAY_PLAN_PASS = process.env.RAZORPAY_PLAN_PASS || 'plan_pass_49_weekly_placeholder';
 const RAZORPAY_PLAN_TRIAL = process.env.RAZORPAY_PLAN_TRIAL || 'plan_trial_99_placeholder';
 const RAZORPAY_PLAN_STANDARD = process.env.RAZORPAY_PLAN_STANDARD || 'plan_standard_199_placeholder';
 const RAZORPAY_PLAN_PREMIUM = process.env.RAZORPAY_PLAN_PREMIUM || 'plan_premium_499_placeholder';
@@ -2218,7 +2218,7 @@ app.post('/subscription/create', async (req, res) => {
     const subscriptionParams = {
       plan_id: planId,
       // Number of billing cycles before Razorpay auto-completes the sub.
-      // The ₹79 'pass' bills WEEKLY, so 12 would end it after ~3 months —
+      // The ₹49 'pass' bills WEEKLY, so 12 would end it after ~3 months —
       // use 156 (~3 years of weekly) so it recurs long-term. Monthly tiers
       // use 12 (= 1 year).
       total_count: plan === 'pass' ? 156 : 12,
@@ -3390,7 +3390,7 @@ app.get('/admin/api/overview', async (req, res) => {
         const isTrial    = planRaw.includes('trial');
         // ₹49 one-time Starter Pass vs legacy ₹99 recurring trial.
         const isPass     = isTrial && d.isOneTime === true;
-        const isWeeklyPass = planRaw === 'pass';   // ₹79/week front-door
+        const isWeeklyPass = planRaw === 'pass';   // ₹49/week front-door
         if (isWeeklyPass) byPlan.weeklyPass++;
         else if (isPremium) byPlan.premium++;
         else if (isStandard) byPlan.standard++;
