@@ -3434,12 +3434,51 @@ app.get('/admin/api/overview', async (req, res) => {
     const retention = {
       entryBuyers: 0, resubscribed: 0, upgradedTo499: 0, upgradedTo999: 0,
     };
+
+    // EARNINGS — real money in, summed from the same payments snapshot.
+    //
+    // Day boundaries are IST, not the container's clock: Render runs UTC, so
+    // a naive "today" would start at 05:30 IST and silently drop the first
+    // five and a half hours of every day's takings. IST is a fixed +05:30
+    // with no DST, so the offset can be pinned literally.
+    //
+    // SCOPE — read this before trusting the number: payment docs are written
+    // client-side by the app on successful checkout (FirestoreService
+    // .savePaymentRecord). Recurring RENEWALS are charged by Razorpay and
+    // synced by the server webhook, which does not write a payment doc. So
+    // this is NEW purchases, not total revenue. Renewals are invisible here
+    // for the same reason they are invisible to Google and Meta bidding.
+    const istDayStartMs = (daysAgo) => {
+      const istToday = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      return Date.parse(istToday + 'T00:00:00+05:30') - daysAgo * 86400000;
+    };
+    const todayStart = istDayStartMs(0);
+    const week7Start = istDayStartMs(6); // today + the 6 days before it
+    const earnings = {
+      todayInr: 0, todayCount: 0,
+      last7Inr: 0, last7Count: 0,
+      currency: 'INR',
+      note: 'New purchases only — renewals are not recorded client-side.',
+    };
+
     try {
       const paySnap = await firestoreDb.collectionGroup('payments').get();
       const byUser = new Map(); // uid -> { trial, standard, premium }
       paySnap.forEach(doc => {
         const d = doc.data() || {};
         if (d.status && d.status !== 'success') return;
+
+        // Earnings roll-up. amountPaise is the authoritative figure — it is
+        // what Razorpay actually charged, so it stays correct across every
+        // past price change (₹79 → ₹49, and the Apr/Jul tier revisions)
+        // without this code needing to know any prices at all.
+        const paise = Number(d.amountPaise);
+        const ts = d.timestamp && typeof d.timestamp.toDate === 'function'
+          ? d.timestamp.toDate().getTime() : null;
+        if (Number.isFinite(paise) && paise > 0 && ts !== null) {
+          if (ts >= week7Start) { earnings.last7Inr += paise; earnings.last7Count++; }
+          if (ts >= todayStart) { earnings.todayInr += paise; earnings.todayCount++; }
+        }
         const uid = doc.ref.parent && doc.ref.parent.parent
           ? doc.ref.parent.parent.id : null;
         if (!uid) return;
@@ -3456,6 +3495,9 @@ app.get('/admin/api/overview', async (req, res) => {
         if (u.trial >= 1 && u.standard >= 1) retention.upgradedTo499++;
         if (u.trial >= 1 && u.premium >= 1) retention.upgradedTo999++;
       });
+      // paise → rupees, once, at the end (avoids float drift while summing).
+      earnings.todayInr = Math.round(earnings.todayInr / 100);
+      earnings.last7Inr = Math.round(earnings.last7Inr / 100);
     } catch (e) {
       console.warn('[admin/overview] payments query failed:', e.message);
     }
@@ -3480,6 +3522,7 @@ app.get('/admin/api/overview', async (req, res) => {
           monthlyInr: mrr.t199 * 199 + mrr.t499 * 499 + mrr.t999 * 999,
         },
         retention,
+        earnings,
       },
     });
   } catch (e) {

@@ -262,6 +262,33 @@
             </div>
           </div>
 
+          <!-- ── EARNINGS (real payments) ── -->
+          <div x-show="!loading && overview" class="mt-4 p-4 rounded-lg bg-gradient-to-br from-amber-900/30 to-slate-900 border border-amber-800/50">
+            <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-amber-300">
+              Earnings
+              <span class="text-xs text-slate-400 normal-case ml-2">(IST days · new purchases, renewals not counted)</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-amber-900/50">
+                <div class="text-xs text-amber-300 uppercase tracking-wide">Today</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-amber-200">₹<span x-text="overview?.subscriptions?.earnings?.todayInr ?? 0"></span></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                <div class="text-xs text-slate-400 uppercase tracking-wide">Today · payments</div>
+                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.earnings?.todayCount ?? 0"></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-amber-900/50">
+                <div class="text-xs text-amber-300 uppercase tracking-wide">Last 7 days</div>
+                <div class="text-2xl font-mono font-semibold mt-1 text-amber-200">₹<span x-text="overview?.subscriptions?.earnings?.last7Inr ?? 0"></span></div>
+              </div>
+              <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
+                <div class="text-xs text-slate-400 uppercase tracking-wide">7d · payments</div>
+                <div class="text-2xl font-mono font-semibold mt-1" x-text="overview?.subscriptions?.earnings?.last7Count ?? 0"></div>
+              </div>
+            </div>
+            <div class="text-xs text-slate-500 mt-3" x-show="overview?.subscriptions?.earnings?.note" x-text="overview?.subscriptions?.earnings?.note"></div>
+          </div>
+
           <!-- ── MONTHLY RECURRING REVENUE ── -->
           <div x-show="!loading && overview" class="mt-4 p-4 rounded-lg bg-gradient-to-br from-purple-900/40 to-slate-900 border border-purple-800/50">
             <div class="font-semibold mb-3 text-sm uppercase tracking-wide text-purple-300">
