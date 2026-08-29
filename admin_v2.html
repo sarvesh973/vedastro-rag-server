@@ -478,7 +478,7 @@
                       <div class="text-xs text-slate-500 font-mono" x-text="s.razorpaySubscriptionId || s.uid.slice(0, 16)"></div>
                     </td>
                     <td class="px-3 py-2">
-                      <span class="text-xs font-mono text-purple-300" x-text="planLabel(s.plan)"></span>
+                      <span class="text-xs font-mono text-purple-300" x-text="planLabel(s.plan, s.isOneTime)"></span>
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
@@ -662,7 +662,7 @@
             <div class="grid grid-cols-2 gap-4 text-sm mb-4">
               <div><span class="text-slate-500">UID:</span> <span class="font-mono text-xs" x-text="lookupResult?.uid"></span></div>
               <div><span class="text-slate-500">Phone:</span> <span x-text="lookupResult?.phoneNumber || '—'"></span></div>
-              <div><span class="text-slate-500">Plan tag:</span> <span x-text="planLabel(lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan)"></span></div>
+              <div><span class="text-slate-500">Plan tag:</span> <span x-text="planLabel(lookupResult?.lastPurchasedPlan || lookupResult?.subscription?.planId || lookupResult?.subscription?.plan, lookupResult?.subscription?.isOneTime)"></span></div>
               <div><span class="text-slate-500">Sub status:</span> <span x-text="lookupResult?.subscription?.status || '—'"></span></div>
               <div><span class="text-slate-500">Chats used:</span> <span x-text="lookupResult?.usage?.chatUsedThisCycle ?? '—'"></span></div>
               <div><span class="text-slate-500">Palm used:</span> <span x-text="lookupResult?.usage?.palmUsedThisCycle ?? '—'"></span></div>
@@ -843,9 +843,19 @@
       weeklyPass:  'Starter Pass · ₹49/wk',
       starterPass: 'Starter Pass · ₹49 one-time (legacy)',
     };
-    function planLabel(p) {
+    // `trial` is OVERLOADED — three different products write plan='trial':
+    //   1. the current ₹199 "Standard" recurring tier   (app /subscription/create)
+    //   2. the legacy ₹99 recurring free-trial           (retired)
+    //   3. the legacy one-time ₹49 Starter Pass          (/order/create, index.js:2279)
+    // Only #3 carries isOneTime, so that one we can resolve from the row.
+    // #1 and #2 are indistinguishable from the subscription doc alone — the
+    // label below reports the current price, which is wrong for any legacy
+    // ₹99 subscriber still active. Check Razorpay directly if that matters.
+    function planLabel(p, isOneTime) {
       if (!p) return '—';
-      return PLAN_LABELS[p] || PLAN_LABELS[String(p).toLowerCase()] || p;
+      var key = String(p).toLowerCase();
+      if (key === 'trial' && isOneTime === true) return PLAN_LABELS.starterPass;
+      return PLAN_LABELS[p] || PLAN_LABELS[key] || p;
     }
 
     function dashboard() {
