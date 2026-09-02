@@ -67,7 +67,19 @@
             <div class="text-xs text-slate-500" x-text="user?.email"></div>
           </div>
         </div>
-        <button @click="signOutClick()" class="text-slate-400 hover:text-white text-sm">Sign out</button>
+        <div class="flex items-center gap-4">
+          <!-- Copies a fresh Firebase ID token for calling the API by hand
+               (curl, probes, debugging) instead of digging through DevTools.
+               Admin-only screen; the token is short-lived and grants exactly
+               what this signed-in admin already has. -->
+          <button @click="copyToken()"
+                  class="text-slate-400 hover:text-white text-sm flex items-center gap-1.5"
+                  :title="tokenMsg || 'Copy a fresh API token to the clipboard'">
+            <span x-text="tokenMsg ? '✓' : '⧉'"></span>
+            <span x-text="tokenMsg || 'Copy token'"></span>
+          </button>
+          <button @click="signOutClick()" class="text-slate-400 hover:text-white text-sm">Sign out</button>
+        </div>
       </header>
 
       <!-- Tabs -->
@@ -974,6 +986,28 @@
           } finally {
             this.loading = false;
           }
+        },
+
+        // Mints a fresh Firebase ID token and puts it on the clipboard.
+        // Falls back to a prompt() the admin can copy from manually, since
+        // navigator.clipboard is unavailable on insecure origins and can be
+        // blocked by browser permissions.
+        tokenMsg: '',
+        async copyToken() {
+          try {
+            const t = await window.__moksha.getToken();
+            if (!t) throw new Error('not signed in');
+            try {
+              await navigator.clipboard.writeText(t);
+              this.tokenMsg = 'Copied';
+            } catch (_) {
+              window.prompt('Copy this token (Ctrl+C, then Enter):', t);
+              this.tokenMsg = 'Copied';
+            }
+          } catch (e) {
+            this.tokenMsg = 'Failed';
+          }
+          setTimeout(() => { this.tokenMsg = ''; }, 2500);
         },
 
         async signOutClick() {
