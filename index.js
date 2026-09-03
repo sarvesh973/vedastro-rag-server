@@ -1120,6 +1120,39 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       p => new Date(p.startTime) <= now && new Date(p.endTime) >= now
     );
 
+    // ── UPCOMING PERIODS — the windows a "when" question needs ──────
+    // Probing the live endpoint showed the model would name the running
+    // antardasha and then omit its date, on the same chart where another
+    // question quoted it correctly. It is not missing data and not a
+    // buried rule (both were tested): a model is simply reluctant to
+    // commit to a dated prediction. So we stop asking it to reason out a
+    // date and hand it finished ones instead — the same split that makes
+    // Mulank verdicts consistent, where the engine decides and the LLM
+    // only writes prose.
+    //
+    // Flattened across mahadasha boundaries so "what comes next" does not
+    // stop dead at the end of the current mahadasha.
+    const fmtLong = (d) => new Date(d).toLocaleDateString('en-IN', {
+      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+    });
+    const antarTimeline = [];
+    for (const m of (chart.dasha.mahadashas || [])) {
+      for (const a of (m.antars || [])) {
+        antarTimeline.push({
+          maha: m.planet, planet: a.planet,
+          start: new Date(a.startTime), end: new Date(a.endTime),
+        });
+      }
+    }
+    antarTimeline.sort((x, y) => x.start - y.start);
+    const curIdx = antarTimeline.findIndex(a => a.start <= now && a.end >= now);
+    const upcoming = curIdx >= 0
+      ? antarTimeline.slice(curIdx, curIdx + 4).map(a => ({
+          maha: a.maha, planet: a.planet,
+          from: fmtLong(a.start), to: fmtLong(a.end),
+        }))
+      : [];
+
     // Build readable chart summary
     const planetSummary = {};
     for (const [name, data] of Object.entries(chart.planets)) {
@@ -1206,6 +1239,13 @@ function calculateChart(birthDate, birthTime, lat, lon) {
         antardasha: currentAntar?.planet || 'unknown',
         antardashaEnd: currentAntar ? new Date(currentAntar.endTime).toLocaleDateString('en-IN') : '',
         pratyantar: currentPratyantar?.planet || '',
+        // Long-form dates for the TIMING ANSWER block. Kept separate from
+        // the short en-IN strings above so nothing that already reads
+        // mahadashaEnd/antardashaEnd changes shape.
+        mahadashaEndLong: currentMaha ? fmtLong(currentMaha.endTime) : '',
+        antardashaEndLong: currentAntar ? fmtLong(currentAntar.endTime) : '',
+        pratyantarEndLong: currentPratyantar ? fmtLong(currentPratyantar.endTime) : '',
+        upcoming,
       },
       birthNakshatra: chart.dasha.birthNakshatra,
       d9Navamsha: d9Summary,
@@ -1243,7 +1283,22 @@ function formatChartForPrompt(chart) {
   text += `\n\nCURRENT DASHA PERIOD:`;
   text += `\n- Mahadasha: ${chart.dasha.mahadasha} (until ${chart.dasha.mahadashaEnd})`;
   text += `\n- Antardasha: ${chart.dasha.antardasha} (until ${chart.dasha.antardashaEnd})`;
-  if (chart.dasha.pratyantar) text += `\n- Pratyantar: ${chart.dasha.pratyantar}`;
+  if (chart.dasha.pratyantar) text += `\n- Pratyantar: ${chart.dasha.pratyantar}${chart.dasha.pratyantarEndLong ? ` (until ${chart.dasha.pratyantarEndLong})` : ''}`;
+
+  // Pre-computed answer to any "when" question. These dates come from the
+  // Vimshottari calculation, not from the model's reasoning, so they are
+  // the same every time the same chart is asked.
+  if (Array.isArray(chart.dasha.upcoming) && chart.dasha.upcoming.length) {
+    text += `\n\nTIMING ANSWER (computed dates - quote these verbatim when the user asks WHEN; never replace them with "achhe yog hain" or "near future"):`;
+    chart.dasha.upcoming.forEach((p, i) => {
+      text += i === 0
+        ? `\n- RUNNING NOW: ${p.planet} Antardasha in ${p.maha} Mahadasha, until ${p.to}`
+        : `\n- THEN: ${p.planet} Antardasha in ${p.maha} Mahadasha, ${p.from} to ${p.to}`;
+    });
+    if (chart.dasha.mahadashaEndLong) {
+      text += `\n- ${chart.dasha.mahadasha} Mahadasha itself runs until ${chart.dasha.mahadashaEndLong}`;
+    }
+  }
 
   text += `\n\nNAVAMSHA (D9) Chart:`;
   for (const [name, sign] of Object.entries(chart.d9Navamsha)) {
@@ -1834,9 +1889,16 @@ BEFORE YOU SEND - check your draft against these six. Every one of them
 has failed against real users. Where any of them conflicts with an
 earlier instruction, these win.
 1. Did the user ask WHEN (when, kab, kab tak, kitne din, which month,
-   konsa mahina)? Then your answer must contain an actual date or month
-   taken from the CURRENT DASHA PERIOD block. "Achhe yog hain", "near
-   future", "soon", or naming a dasha with no date - rewrite it.
+   konsa mahina)? Then COPY the dates out of the TIMING ANSWER block
+   above into your reply - the running period with the date it ends, and
+   at least one upcoming period with its window. Those dates are already
+   computed for this chart; you are reporting them, not predicting them,
+   so there is nothing to hedge. Naming a dasha lord without its date,
+   or writing "achhe yog hain" / "near future" / "soon" / "is dasha
+   mein" instead of the date, is the single most common complaint from
+   real users - they ask the same question again and again until they
+   get a month. If the TIMING ANSWER block is absent, say in one line
+   that exact timing needs their birth time.
 2. Did the user offer a CHOICE (X or Y, "army or business", "marry now
    or wait")? Name BOTH options, say which the chart favours, give the
    reason. Praising one and never mentioning the other - rewrite it.
