@@ -1323,18 +1323,37 @@ function buildTimingBlock(chart, topic) {
     ...map.karakas.map(k => `karaka ${k}`),
   ])].join(', ');
 
-  let t = `\n\nTIMING FOR THIS QUESTION (${map.label}) - computed from the Vimshottari timeline, not inferred.`;
-  t += `\nGoverned by: ${who}. The periods below are the ones that carry ${map.label} for this chart:`;
-  rel.forEach((p, i) => {
-    t += i === 0
-      ? `\n- ${p.planet} Antardasha (in ${p.maha} Mahadasha): ${p.from} to ${p.to}`
-      : `\n- then ${p.planet} Antardasha (in ${p.maha} Mahadasha): ${p.from} to ${p.to}`;
-  });
-  t += `\nQuote these dates when the user asks WHEN. They differ by question because different houses govern different areas - do not substitute the generic current-antardasha date.`;
+  // Pre-written sentence, not a table. Offering rows to interpret produced
+  // "Saturn Mahadasha ... 14 February 2036" when 2036 was the end of the
+  // JUPITER antardasha, and turned 5 February into 4 February. There is
+  // nothing left to assemble here, so there is nothing to mis-assemble.
+  const first = rel[0];
+  const sentence = `The period supporting ${map.label} in this chart is `
+    + `${first.planet} Antardasha (within ${first.maha} Mahadasha), `
+    + `${first.from} to ${first.to}.`;
+  const later = rel.slice(1).map(p =>
+    `${p.planet} Antardasha (within ${p.maha} Mahadasha), ${p.from} to ${p.to}`);
+
+  let t = `\n\nANSWER FOR "WHEN" (${map.label}) - computed from this chart's Vimshottari timeline, governed by ${who}.`;
+  t += `\nSTATE THIS SENTENCE when the user asks when: "${sentence}"`;
+  if (later.length) {
+    t += `\nIf a later window is useful, the next ones are: ${later.join('; ')}.`;
+  }
+  t += `\nRules for these dates: copy them exactly, digit for digit. Do NOT`;
+  t += `\nre-attach a date to a different period than the one named beside`;
+  t += `\nit, do NOT round or shift a day, and do NOT replace this with the`;
+  t += `\ncurrent-antardasha date from the chart block above - that one is`;
+  t += `\ngeneric to the whole chart and is NOT the answer to this question.`;
   return t;
 }
 
-function formatChartForPrompt(chart) {
+// `suppressGeneric` drops the chart-wide TIMING ANSWER block. It exists
+// because leaving both blocks in gave the model two sources each saying
+// "quote these", and the generic one won - marriage, money, health and
+// children all came back with the same current-antardasha date. When a
+// topic-specific window is available it is the only timing source the
+// model should see.
+function formatChartForPrompt(chart, suppressGeneric) {
   if (!chart) return '';
 
   let text = `\n\nUSER'S BIRTH CHART (Calculated):`;
@@ -1354,7 +1373,7 @@ function formatChartForPrompt(chart) {
   // Pre-computed answer to any "when" question. These dates come from the
   // Vimshottari calculation, not from the model's reasoning, so they are
   // the same every time the same chart is asked.
-  if (Array.isArray(chart.dasha.upcoming) && chart.dasha.upcoming.length) {
+  if (!suppressGeneric && Array.isArray(chart.dasha.upcoming) && chart.dasha.upcoming.length) {
     text += `\n\nTIMING ANSWER (computed dates - quote these verbatim when the user asks WHEN; never replace them with "achhe yog hain" or "near future"):`;
     chart.dasha.upcoming.forEach((p, i) => {
       text += i === 0
@@ -1784,8 +1803,11 @@ different planet.
   // Chart facts, then the window for THIS question's own house/karaka.
   // The generic block in formatChartForPrompt gives the same date to every
   // topic; this one differs by question, which is what makes it a reading.
+  // One authoritative timing source: the topic-specific window when we can
+  // compute one, the generic chart-wide block only as fallback.
+  const timingBlock = chartData ? buildTimingBlock(chartData, topic) : '';
   const chartContext = chartData
-    ? formatChartForPrompt(chartData) + buildTimingBlock(chartData, topic)
+    ? formatChartForPrompt(chartData, !!timingBlock) + timingBlock
     : '';
 
   const historyContext = chatHistory && chatHistory.length > 0
