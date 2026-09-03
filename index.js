@@ -1135,6 +1135,13 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     const fmtLong = (d) => new Date(d).toLocaleDateString('en-IN', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
     });
+    // House lords, so a timing answer can key off the house that actually
+    // governs the question. houses[n-1].rashi is the sign number (1=Aries).
+    // Rahu and Ketu rule nothing here - classical lordship only.
+    const SIGN_LORD = [null, 'Mars', 'Venus', 'Mercury', 'Moon', 'Sun', 'Mercury',
+      'Venus', 'Mars', 'Jupiter', 'Saturn', 'Saturn', 'Jupiter'];
+    const houseLords = (chart.houses || []).map(h => SIGN_LORD[h.rashi] || null);
+
     const antarTimeline = [];
     for (const m of (chart.dasha.mahadashas || [])) {
       for (const a of (m.antars || [])) {
@@ -1246,6 +1253,15 @@ function calculateChart(birthDate, birthTime, lat, lon) {
         antardashaEndLong: currentAntar ? fmtLong(currentAntar.endTime) : '',
         pratyantarEndLong: currentPratyantar ? fmtLong(currentPratyantar.endTime) : '',
         upcoming,
+        houseLords,
+        // Full antardasha timeline, kept server-side so a topic-specific
+        // window can be selected at prompt time. Never sent wholesale to
+        // the model - buildTimingBlock picks the relevant few.
+        timeline: antarTimeline.map(a => ({
+          maha: a.maha, planet: a.planet,
+          from: fmtLong(a.start), to: fmtLong(a.end),
+          endMs: a.end.getTime(),
+        })),
       },
       birthNakshatra: chart.dasha.birthNakshatra,
       d9Navamsha: d9Summary,
@@ -1266,6 +1282,56 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     console.error('Chart calculation error:', err.message);
     return null;
   }
+}
+
+// ── TOPIC-SPECIFIC TIMING ──────────────────────────────────────────
+// A chart-level "current antardasha ends X" is the same answer for every
+// question, so marriage, job and money all came back with one identical
+// date. That is not a reading, and a user asking three questions notices
+// immediately. Each area is governed by its own house and karaka, so the
+// window offered has to be the one for the area actually asked about.
+// Houses and karakas mirror the LEAD WITH THE QUESTION'S OWN HOUSE/LORD
+// rule already in the chat prompt.
+const TOPIC_TIMING = [
+  { re: /marriage|relationship|romance|spouse/, houses: [7], karakas: ['Venus', 'Jupiter'], label: 'marriage and partnership' },
+  { re: /career|job|business|promotion|profession/, houses: [10], karakas: ['Saturn', 'Mercury', 'Sun'], label: 'career and work' },
+  { re: /finance|wealth|money|dhan/, houses: [2, 11], karakas: ['Jupiter', 'Venus'], label: 'money and gains' },
+  { re: /child|conception|progeny|santan/, houses: [5], karakas: ['Jupiter'], label: 'children' },
+  { re: /health|illness|disease/, houses: [1, 6], karakas: ['Sun', 'Mars'], label: 'health' },
+  { re: /foreign|abroad|settle|videsh/, houses: [9, 12], karakas: ['Rahu', 'Jupiter'], label: 'travel and settling abroad' },
+  { re: /education|exam|study|learning/, houses: [4, 5], karakas: ['Mercury', 'Jupiter'], label: 'study and exams' },
+  { re: /property|home|vehicle/, houses: [4], karakas: ['Mars', 'Venus'], label: 'property and home' },
+  { re: /spiritual|moksha|dharma/, houses: [9, 12], karakas: ['Jupiter', 'Ketu'], label: 'spiritual life' },
+];
+
+function buildTimingBlock(chart, topic) {
+  const d = chart && chart.dasha;
+  if (!d || !Array.isArray(d.timeline) || !d.timeline.length) return '';
+  const map = TOPIC_TIMING.find(m => m.re.test(String(topic || '').toLowerCase()));
+  if (!map) return '';
+
+  const lords = (map.houses || [])
+    .map(h => (d.houseLords || [])[h - 1])
+    .filter(Boolean);
+  const wanted = new Set([...lords, ...(map.karakas || [])]);
+  const now = Date.now();
+  const rel = d.timeline.filter(p => wanted.has(p.planet) && p.endMs >= now).slice(0, 3);
+  if (!rel.length) return '';
+
+  const who = [...new Set([
+    ...map.houses.map((h, i) => `${h}th lord ${lords[i] || '?'}`),
+    ...map.karakas.map(k => `karaka ${k}`),
+  ])].join(', ');
+
+  let t = `\n\nTIMING FOR THIS QUESTION (${map.label}) - computed from the Vimshottari timeline, not inferred.`;
+  t += `\nGoverned by: ${who}. The periods below are the ones that carry ${map.label} for this chart:`;
+  rel.forEach((p, i) => {
+    t += i === 0
+      ? `\n- ${p.planet} Antardasha (in ${p.maha} Mahadasha): ${p.from} to ${p.to}`
+      : `\n- then ${p.planet} Antardasha (in ${p.maha} Mahadasha): ${p.from} to ${p.to}`;
+  });
+  t += `\nQuote these dates when the user asks WHEN. They differ by question because different houses govern different areas - do not substitute the generic current-antardasha date.`;
+  return t;
 }
 
 function formatChartForPrompt(chart) {
@@ -1715,7 +1781,12 @@ different planet.
     ? `USER'S BIRTH DETAILS:\n${userProfile}\n${ageNote}`
     : 'No birth details available.';
 
-  const chartContext = chartData ? formatChartForPrompt(chartData) : '';
+  // Chart facts, then the window for THIS question's own house/karaka.
+  // The generic block in formatChartForPrompt gives the same date to every
+  // topic; this one differs by question, which is what makes it a reading.
+  const chartContext = chartData
+    ? formatChartForPrompt(chartData) + buildTimingBlock(chartData, topic)
+    : '';
 
   const historyContext = chatHistory && chatHistory.length > 0
     ? 'RECENT CONVERSATION (use this for context, do NOT repeat previous answers):\n' + chatHistory.slice(-10).join('\n')
