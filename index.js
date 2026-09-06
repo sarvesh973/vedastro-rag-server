@@ -3388,25 +3388,75 @@ app.post('/search', async (req, res) => {
 // Returns: { loveLine: {...}, careerLine: {...}, lifeLine: {...} }
 //   OR     { error: "NOT_A_PALM", message: "..." }
 
-const PALM_PROMPT = `You are a Vedic palm reading expert versed in Samudrik Shastra.
+// Palm reading prompt. Two things to know before editing:
+//
+// 1. We have NO palmistry text in the corpus - it is BPHS, Phaladeepika
+//    and Saravali, all horoscopy. The old prompt told the model to
+//    "reference Samudrik Shastra", so every such citation was invented.
+//    It now describes traditions in general terms and cites nothing.
+//
+// 2. The mounts are the bridge to the chart. Each mount carries a planet
+//    we already compute, so when birth details are supplied the reading
+//    can cross-check the hand against the actual placement. That is the
+//    part no generic palm app can copy.
+const PALM_PROMPT_BASE = `You are an experienced hasta-rekha (palm reading) practitioner in the Indian tradition.
 
 FIRST: Check if the image actually shows a human palm/hand. If NOT, return EXACTLY this JSON:
 {"error":"NOT_A_PALM","message":"This image does not show a hand. Please upload a clear photo of your palm with fingers spread."}
 
-If it IS a palm, analyze:
-1. Heart Line (Hridaya Rekha): Love, emotions, relationships
-2. Head Line (Buddhi Rekha): Intelligence, thinking style, career approach
-3. Life Line (Jeevan Rekha): Vitality, energy, life journey (NOT lifespan)
+If it IS a palm, read what is ACTUALLY VISIBLE in this image:
+1. Heart Line (Hridaya Rekha): emotional nature, how they attach and express affection
+2. Head Line (Buddhi Rekha): thinking style, focus, how they approach decisions
+3. Life Line (Jeevan Rekha): vitality, constitution, life rhythm (NEVER lifespan)
+4. Fate Line (Bhagya Rekha) if visible: direction of work and livelihood
+5. Mounts: which pads look developed - Jupiter (index), Saturn (middle),
+   Sun (ring), Mercury (little), Venus (thumb base), Luna (outer edge), Mars
+6. Hand shape and finger proportion: overall temperament
 
+HONESTY RULES - these matter more than completeness:
+- Describe only what you can genuinely see. If the fate line is not visible,
+  or the image is too dark to judge the mounts, SAY SO in that section
+  instead of inventing a finding. A reading that admits what it cannot see
+  is trusted; one that describes everything perfectly is not.
+- Do NOT cite any book, chapter or verse. You may say "in the Indian
+  palmistry tradition" but never name a text or quote one.
+- NEVER predict death, lifespan, or a named illness.
+- No guaranteed outcomes. Describe tendency and temperament, not events.`;
+
+const PALM_JSON_SHAPE = `
 Return ONLY valid JSON, no markdown:
 {
   "loveLine": {"title":"Heart Line","emoji":"❤️","insight":"...","meaning":"...","advice":"..."},
   "careerLine": {"title":"Head Line","emoji":"🧠","insight":"...","meaning":"...","advice":"..."},
-  "lifeLine": {"title":"Life Line","emoji":"🧬","insight":"...","meaning":"...","advice":"..."}
+  "lifeLine": {"title":"Life Line","emoji":"🧬","insight":"...","meaning":"...","advice":"..."},
+  "fateLine": {"title":"Fate Line","emoji":"🧭","insight":"...","meaning":"...","advice":"..."},
+  "mounts": {"title":"Mounts","emoji":"⛰️","insight":"...","meaning":"...","advice":"..."}
 }
+Each section: 3-4 sentences, warm and direct.`;
 
-Each section: 3-4 sentences, warm tone, reference Samudrik Shastra.
-NEVER predict death or lifespan.`;
+// Chart fusion. Only added when birth details were supplied - without it
+// the reading stays exactly as it was, image-only.
+function palmChartContext(chartData) {
+  if (!chartData) return '';
+  const p = chartData.planets || {};
+  const line = (n) => p[n] ? `${n} in ${p[n].sign}, House ${p[n].house}` : null;
+  const placements = ['Jupiter', 'Saturn', 'Sun', 'Mercury', 'Venus', 'Mars', 'Moon']
+    .map(line).filter(Boolean).join('; ');
+  const d = chartData.dasha || {};
+  return `
+
+THIS PERSON'S BIRTH CHART - cross-check the hand against it:
+Ascendant: ${chartData.ascendant?.sign || 'unknown'}. ${placements}
+Running period: ${d.mahadasha} Mahadasha / ${d.antardasha} Antardasha${d.antardashaEndLong ? ` (until ${d.antardashaEndLong})` : ''}.
+
+Each mount carries the same planet as the chart. Where the hand and the
+chart AGREE, say so plainly - that agreement is the most useful thing you
+can tell this person, and it is what a photo alone cannot give them.
+Where they DISAGREE, say that too: a weak mount with a strong placement
+means the potential is there but underused, and that is worth knowing.
+Name the specific placement you are comparing against. Do not restate the
+whole chart - only what the hand actually speaks to.`;
+}
 
 const MAX_PALM_BYTES = 5 * 1024 * 1024; // 5 MB raw
 
@@ -3416,7 +3466,8 @@ app.post('/palm', async (req, res) => {
   if (!await rateLimit(auth, 'palm', res)) return;
 
   try {
-    const { imageBase64, mimeType = 'image/jpeg' } = req.body || {};
+    const { imageBase64, mimeType = 'image/jpeg', hand,
+      birthDate, birthTime, place, lat, lon } = req.body || {};
     if (!imageBase64 || typeof imageBase64 !== 'string') {
       return res.status(400).json({ error: 'imageBase64 required' });
     }
@@ -3435,8 +3486,33 @@ app.post('/palm', async (req, res) => {
       generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
     });
 
+    // Chart is optional and best-effort: a palm reading must still work
+    // for someone who has not entered birth details, so any failure here
+    // degrades to the image-only reading rather than failing the request.
+    let chartData = null;
+    if (birthDate && birthTime) {
+      try {
+        let coords = { lat, lon };
+        if ((!coords.lat || !coords.lon) && place) coords = await geocodePlace(place);
+        if (coords && coords.lat && coords.lon) {
+          chartData = calculateChart(birthDate, birthTime, coords.lat, coords.lon);
+        }
+      } catch (e) {
+        console.warn('[palm] chart unavailable, image-only reading:', e.message);
+      }
+    }
+
+    // Which hand, if the app said. Non-dominant reads as what was given,
+    // dominant as what has been made of it - the distinction every serious
+    // palmist draws and no generic app asks for.
+    const handNote = hand === 'left' || hand === 'right'
+      ? `\n\nThis is the user's ${hand} hand.`
+      : '';
+
+    const promptText = PALM_PROMPT_BASE + handNote + palmChartContext(chartData) + PALM_JSON_SHAPE;
+
     const result = await model.generateContent([
-      PALM_PROMPT,
+      promptText,
       { inlineData: { data: imageBase64, mimeType } },
     ]);
     const text = result.response.text();
@@ -3467,20 +3543,142 @@ app.post('/palm', async (req, res) => {
       }
     }
 
-    // Log to user's palmReadings subcollection
+    // Store, and hand back the id. /palm/ask needs to answer against the
+    // reading the user is actually looking at, and without an id the client
+    // would have to post the whole reading back on every follow-up.
+    let readingId = null;
     if (firestoreDb) {
       try {
-        await firestoreDb.collection(`users/${auth.uid}/palmReadings`).add({
+        const ref = await firestoreDb.collection(`users/${auth.uid}/palmReadings`).add({
           result: parsed,
+          hand: hand || null,
+          usedChart: !!chartData,
           createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
         });
+        readingId = ref.id;
       } catch (_) {}
     }
 
-    return res.status(200).json(parsed);
+    return res.status(200).json({ ...parsed, readingId, usedChart: !!chartData });
   } catch (err) {
     console.error('[palm] error:', err.message);
     return res.status(500).json({ error: 'Palm reading service error. Please try again.' });
+  }
+});
+
+// =========================================
+// PALM CHAT — follow-up questions about a reading
+// =========================================
+//
+// Deliberately NOT the same voice or rules as /chat:
+//
+//   /chat       Jyotishi. Retrieves verses from BPHS/Phaladeepika/Saravali,
+//               cites book and chapter, answers in the summary+details JSON
+//               shape, leads with the question's own house and lord.
+//
+//   /palm/ask   Palmist. No retrieval and no corpus, because we have no
+//               palmistry text - so it cites NOTHING and must never name a
+//               book. It answers only from the reading already produced for
+//               this user's hand, plus their chart when we have it. Plain
+//               conversational bullets, no JSON envelope.
+//
+// The hard rule is the third one below: it may not invent a palm feature
+// that is not in the stored reading. Without that it will happily describe
+// a marriage line nobody ever observed.
+const PALM_CHAT_PROMPT = `You are an experienced hasta-rekha (palm reading) practitioner, continuing a conversation with someone whose palm you have already read.
+
+WHAT YOU MAY USE:
+- THE READING below. It is what was actually observed in this person's hand.
+- THEIR BIRTH CHART below, when present, to cross-check what the hand shows.
+- Nothing else.
+
+RULES:
+1. NEVER invent a palm feature that is not in the reading. If they ask about
+   their marriage line, their travel lines, or anything not observed, say
+   plainly that the photo did not show it clearly and offer to look at a new
+   photo. Do not describe it anyway.
+2. NEVER cite a book, chapter, verse or author. You have no text to cite.
+   "In the palmistry tradition" is fine; naming a text is not.
+3. Where the hand and the chart agree, say so - that is the most useful
+   thing you can tell them. Where they differ, say that too.
+4. No death, no lifespan, no named illness. Anything touching health ends
+   with one line telling them to see a doctor.
+5. No guaranteed outcomes. Tendencies and temperament, never events.
+6. Answer the question asked. 2 to 4 short bullets, warm and direct. This is
+   a conversation, not a report - do not re-read their whole palm each time.
+7. Address them by first name if you know it. Never invent a name.`;
+
+app.post('/palm/ask', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+  try {
+    const { question, readingId, reading, chatHistory, language,
+      birthDate, birthTime, place, lat, lon, userProfile } = req.body || {};
+    if (!question || typeof question !== 'string') {
+      return res.status(400).json({ error: 'question is required' });
+    }
+
+    // Resolve the reading: an id (preferred - the client need not resend it)
+    // or the object itself, for clients that still hold it in memory.
+    let readingObj = reading && typeof reading === 'object' ? reading : null;
+    if (!readingObj && readingId && firestoreDb) {
+      try {
+        const doc = await firestoreDb.doc(`users/${auth.uid}/palmReadings/${readingId}`).get();
+        if (doc.exists) readingObj = (doc.data() || {}).result || null;
+      } catch (e) {
+        console.warn('[palm/ask] reading fetch failed:', e.message);
+      }
+    }
+    if (!readingObj) {
+      return res.status(400).json({
+        error: 'no_reading',
+        message: 'Scan your palm first, then you can ask about it.',
+      });
+    }
+
+    // Metered on the chat quota, same as /mulank/ask - a live LLM turn.
+    if (!auth.isAdmin && !await rateLimit(auth, 'chat', res)) return;
+
+    let chartData = null;
+    if (birthDate && birthTime) {
+      try {
+        let coords = { lat, lon };
+        if ((!coords.lat || !coords.lon) && place) coords = await geocodePlace(place);
+        if (coords && coords.lat && coords.lon) {
+          chartData = calculateChart(birthDate, birthTime, coords.lat, coords.lon);
+        }
+      } catch (_) {}
+    }
+
+    const readingText = Object.values(readingObj)
+      .filter(v => v && typeof v === 'object' && v.title)
+      .map(v => `${v.title}: ${[v.insight, v.meaning, v.advice].filter(Boolean).join(' ')}`)
+      .join('\n');
+
+    const history = Array.isArray(chatHistory) && chatHistory.length
+      ? `\n\nRECENT CONVERSATION:\n${chatHistory.slice(-6).join('\n')}`
+      : '';
+
+    const prompt = PALM_CHAT_PROMPT
+      + (userProfile ? `\n\nUSER:\n${userProfile}` : '')
+      + `\n\nTHE READING FROM THEIR HAND:\n${readingText}`
+      + palmChartContext(chartData)
+      + history
+      + `\n\nTHEIR QUESTION: ${question.slice(0, 500)}`
+      + `\n\nAnswer in ${(language || '').toLowerCase().startsWith('en') ? 'English' : 'Hinglish'}. Bullets only, no JSON, no headings.`;
+
+    let answer = null;
+    try {
+      answer = await generateResponse(prompt, { temperature: 0.4 });
+    } catch (e) {
+      console.warn('[palm/ask] LLM failed:', e.message);
+      return res.status(503).json({ error: 'reading_unavailable' });
+    }
+
+    return res.json({ answer: String(answer || '').trim(), usedChart: !!chartData });
+  } catch (e) {
+    console.error('[palm/ask]', e);
+    return res.status(400).json({ error: e.message });
   }
 });
 
