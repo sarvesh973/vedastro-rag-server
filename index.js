@@ -5153,6 +5153,16 @@ mulankRoutes.registerMulankRoutes(app, {
   verifyAuth, rateLimit, firestoreDb, firebaseAdmin, generateResponse,
 });
 
+// --- COMPATIBILITY (Ashtakoot Guna Milan) ---
+// Deterministic 36-point engine + cached prose. Cache is keyed on the two
+// (nakshatra, rashi) pairs, not on the users, so couples with the same Moon
+// placements share one generation.
+const compatRoutes = require('./lib/compat-routes');
+compatRoutes.registerCompatRoutes(app, {
+  verifyAuth, rateLimit, firestoreDb, firebaseAdmin, generateResponse,
+  calculateChart, geocodePlace,
+});
+
 // Pre-warm the 9 mulank readings each morning so the first user never
 // waits and the cache is always fresh. Languages via MULANK_LANGS env
 // (comma-separated), default 'en,hinglish'. Cost ≤ 9 × langs per period.
