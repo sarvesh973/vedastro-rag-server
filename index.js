@@ -2201,18 +2201,22 @@ function sanitizeSrc(s) {
 // Play Store install-referrer string. Google Play captures this and
 // surfaces it in Play Console → Acquisition reports (UTM), so you can
 // see INSTALLS (not just taps) per source — the metric that matters.
-function playReferrer(src) {
-  return `utm_source=${src}&utm_medium=bio&utm_campaign=social`;
+// `medium` separates paid-creator traffic from our own bio links in Play
+// Console. Pass ?medium=influencer on a creator's link; it defaults to bio
+// so every existing link in the wild keeps reporting exactly as before.
+function playReferrer(src, medium) {
+  const m = sanitizeSrc(medium || 'bio');
+  return `utm_source=${src}&utm_medium=${m}&utm_campaign=${src}`;
 }
-function playWebUrl(src) {
+function playWebUrl(src, medium) {
   return `https://play.google.com/store/apps/details?id=${PLAY_PACKAGE}` +
-    `&referrer=${encodeURIComponent(playReferrer(src))}`;
+    `&referrer=${encodeURIComponent(playReferrer(src, medium))}`;
 }
-function playIntentUrl(src) {
+function playIntentUrl(src, medium) {
   return `intent://details?id=${PLAY_PACKAGE}` +
-    `&referrer=${encodeURIComponent(playReferrer(src))}` +
+    `&referrer=${encodeURIComponent(playReferrer(src, medium))}` +
     `#Intent;scheme=market;package=com.android.vending;` +
-    `S.browser_fallback_url=${encodeURIComponent(playWebUrl(src))};end`;
+    `S.browser_fallback_url=${encodeURIComponent(playWebUrl(src, medium))};end`;
 }
 
 // Best-effort tap counter. One atomic write per click to a per-day doc;
@@ -2242,8 +2246,9 @@ app.get('/get', (req, res) => {
   logLinkClick(src, platform);
   console.log(`[get] tap src=${src} platform=${platform}`);
 
-  const webUrl = playWebUrl(src);
-  const intentUrl = playIntentUrl(src);
+  const medium = sanitizeSrc(req.query.medium || 'bio');
+  const webUrl = playWebUrl(src, medium);
+  const intentUrl = playIntentUrl(src, medium);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
@@ -4359,7 +4364,47 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       else summary.other++;
     }
 
-    res.json({ summary, items: rows.slice(0, limit) });
+    // ── PER-SOURCE FUNNEL ─────────────────────────────────
+    // The point of install attribution: what a creator is actually worth.
+    // Taps and installs are already visible (link_stats and Play Console);
+    // this is the half that was missing - how many of a source's signups
+    // became paying subscribers.
+    //
+    // `attribution.source` is stamped on the user doc at signup by the app,
+    // for organic users too, so the rate has a denominator. Users predating
+    // that build have no field and fall into 'unknown' rather than being
+    // silently counted as organic - those are two different things and
+    // merging them would flatter every creator.
+    const bySource = {};
+    try {
+      const usersSnap = await firestoreDb.collection('users')
+        .select('attribution').get();
+      const sourceOf = new Map();
+      usersSnap.forEach(doc => {
+        const a = (doc.data() || {}).attribution;
+        sourceOf.set(doc.id, (a && a.source) ? a.source : 'unknown');
+        const s = sourceOf.get(doc.id);
+        bySource[s] = bySource[s] || { signups: 0, subscribers: 0, active: 0 };
+        bySource[s].signups++;
+      });
+      const alive = new Set(['active', 'trialing', 'paused']);
+      for (const r of rows) {
+        const s = sourceOf.get(r.uid) || 'unknown';
+        bySource[s] = bySource[s] || { signups: 0, subscribers: 0, active: 0 };
+        bySource[s].subscribers++;
+        if (alive.has(r.status)) bySource[s].active++;
+      }
+      for (const s of Object.keys(bySource)) {
+        const b = bySource[s];
+        b.conversionPct = b.signups
+          ? Math.round((b.subscribers / b.signups) * 1000) / 10
+          : 0;
+      }
+    } catch (e) {
+      console.warn('[admin/subscriptions] bySource failed:', e.message);
+    }
+
+    res.json({ summary, bySource, items: rows.slice(0, limit) });
   } catch (e) {
     console.error('[admin/subscriptions]', e);
     res.status(500).json({ error: e.message });
