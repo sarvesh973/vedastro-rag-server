@@ -2198,6 +2198,25 @@ function sanitizeSrc(s) {
   return t || 'direct';
 }
 
+// Which acquisition channel a user came from, for the admin table.
+//
+// `medium` is whatever was on the link (`/get?src=x&medium=y`), so the ad
+// mediums are listed explicitly rather than inferred — a typo'd medium shows
+// up as 'other' and gets noticed, instead of being quietly counted as paid
+// spend. Use `medium=cpc` on ad links: it is the UTM convention and what
+// Play Console expects.
+const AD_MEDIUMS = new Set(['cpc', 'ppc', 'ads', 'paid', 'paidsocial', 'paid_social']);
+
+function channelOf(source, medium) {
+  // No attribution field at all: installed before attribution shipped, or
+  // sideloaded. Deliberately NOT 'organic' — those are different claims.
+  if (!source) return 'unknown';
+  if (AD_MEDIUMS.has(medium)) return 'ads';
+  if (medium === 'influencer') return 'influencer';
+  if (source === 'organic') return 'organic';
+  return 'other';
+}
+
 // Play Store install-referrer string. Google Play captures this and
 // surfaces it in Play Console → Acquisition reports (UTM), so you can
 // see INSTALLS (not just taps) per source — the metric that matters.
@@ -4380,8 +4399,10 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       const usersSnap = await firestoreDb.collection('users')
         .select('attribution').get();
       const sourceOf = new Map();
+      const attrOf = new Map();   // uid -> { source, medium } for the row badge
       usersSnap.forEach(doc => {
         const a = (doc.data() || {}).attribution;
+        attrOf.set(doc.id, { source: (a && a.source) || null, medium: (a && a.medium) || null });
         sourceOf.set(doc.id, (a && a.source) ? a.source : 'unknown');
         const s = sourceOf.get(doc.id);
         bySource[s] = bySource[s] || { signups: 0, subscribers: 0, active: 0 };
@@ -4393,6 +4414,13 @@ app.get('/admin/api/subscriptions', async (req, res) => {
         bySource[s] = bySource[s] || { signups: 0, subscribers: 0, active: 0 };
         bySource[s].subscribers++;
         if (alive.has(r.status)) bySource[s].active++;
+
+        // Per-row attribution, so one subscriber can be read as paid or not
+        // without cross-referencing the funnel table above.
+        const at = attrOf.get(r.uid) || {};
+        r.source = at.source || null;
+        r.medium = at.medium || null;
+        r.channel = channelOf(at.source, at.medium);
       }
       for (const s of Object.keys(bySource)) {
         const b = bySource[s];

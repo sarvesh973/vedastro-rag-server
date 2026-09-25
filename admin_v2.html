@@ -467,6 +467,59 @@
 
         <!-- ── SUBSCRIPTIONS ── -->
         <section x-show="tab === 'subs'">
+          <!-- ── WHERE SUBSCRIBERS CAME FROM ──
+               Taps live in Link Clicks and installs in Play Console; this is
+               the half that was missing - how many of a source's signups
+               actually paid. That is the number a creator gets paid on.
+               Hidden entirely when nothing is attributed yet, so it does not
+               sit there as an empty table before the first release ships. -->
+          <div x-show="subsBySource.length" class="mb-5 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+            <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <div class="font-semibold text-sm uppercase tracking-wide text-purple-300">Where subscribers came from</div>
+              <div class="text-xs text-slate-500">signup &rarr; subscriber, by install source</div>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-950/60 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th class="text-left px-4 py-2">Source</th>
+                    <th class="text-right px-4 py-2">Signups</th>
+                    <th class="text-right px-4 py-2">Subscribers</th>
+                    <th class="text-right px-4 py-2">Still active</th>
+                    <th class="text-right px-4 py-2">Convert</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="row in subsBySource" :key="row.source">
+                    <tr class="border-t border-slate-800">
+                      <td class="px-4 py-2">
+                        <span class="font-mono" x-text="row.source"></span>
+                        <!-- 'unknown' is not 'organic'. These users predate
+                             attribution, so their source is unknowable -
+                             counting them as organic would flatter every
+                             creator's rate by comparison. -->
+                        <span x-show="row.source === 'unknown'"
+                              class="ml-2 text-xs text-slate-600">predates tracking</span>
+                      </td>
+                      <td class="px-4 py-2 text-right font-mono" x-text="row.signups"></td>
+                      <td class="px-4 py-2 text-right font-mono text-purple-300" x-text="row.subscribers"></td>
+                      <td class="px-4 py-2 text-right font-mono text-emerald-400" x-text="row.active"></td>
+                      <td class="px-4 py-2 text-right font-mono"
+                          :class="row.conversionPct >= 5 ? 'text-emerald-400'
+                                : row.conversionPct >= 2 ? 'text-amber-300' : 'text-slate-500'">
+                        <span x-text="row.conversionPct"></span>%
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="px-4 py-2 text-xs text-slate-600 border-t border-slate-800">
+              Installs that arrive without a referrer count as organic, so per-source
+              numbers are a floor. Expect to undercount by roughly 20-40%.
+            </div>
+          </div>
+
           <div x-show="subsSummary" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 mb-4">
             <template x-for="key in ['total','active','trialing','cancelledPending','expired','paused','paymentFailed']" :key="key">
               <button @click="subsFilter = (key === 'total' ? 'all' : key)"
@@ -502,6 +555,7 @@
                 <tr>
                   <th class="px-3 py-2 text-left">User</th>
                   <th class="px-3 py-2 text-left">Plan</th>
+                  <th class="px-3 py-2 text-left">From</th>
                   <th class="px-3 py-2 text-left">Status</th>
                   <th class="px-3 py-2 text-left">Subscribed</th>
                   <th class="px-3 py-2 text-left">Period ends</th>
@@ -518,6 +572,22 @@
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs font-mono text-purple-300" x-text="planLabel(s.plan, s.isOneTime)"></span>
+                    </td>
+                    <!-- Acquisition channel. Paid and creator traffic are the two
+                         worth spotting at a glance; organic and unknown stay dim so
+                         they do not compete for attention. 'unknown' means the user
+                         predates attribution or sideloaded — NOT that they are organic. -->
+                    <td class="px-3 py-2">
+                      <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
+                        :class="s.channel === 'ads' ? 'bg-sky-950 text-sky-300'
+                              : s.channel === 'influencer' ? 'bg-fuchsia-950 text-fuchsia-300'
+                              : s.channel === 'other' ? 'bg-amber-950 text-amber-300'
+                              : s.channel === 'organic' ? 'bg-slate-800 text-slate-400'
+                              : 'bg-slate-900 text-slate-600'"
+                        x-text="s.channel === 'ads' ? '● ads' : (s.channel || 'unknown')"></span>
+                      <div class="text-[10px] text-slate-500 font-mono mt-0.5"
+                        x-show="s.source && s.source !== 'organic'"
+                        x-text="s.source + (s.medium ? ' / ' + s.medium : '')"></div>
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
@@ -922,6 +992,7 @@
         signupQuery: '',
         subscriptions: [],
         subsSummary: null,
+        subsBySource: [],
         subsFilter: 'all',
         recentChats: [],
         topUsers: [],
@@ -1167,6 +1238,12 @@
             if (!r.ok) { this.error = d.error || 'Failed: ' + r.status; return; }
             this.subscriptions = d.items || [];
             this.subsSummary = d.summary || null;
+            // Per-source funnel. Sorted by subscribers, because the question
+            // this table answers is which creator to keep paying - not which
+            // one sent the most signups.
+            this.subsBySource = Object.entries(d.bySource || {})
+              .map(([source, v]) => ({ source, ...v }))
+              .sort((a, b) => b.subscribers - a.subscribers || b.signups - a.signups);
           } catch (e) {
             this.error = e.message;
           } finally {
