@@ -555,6 +555,7 @@
                 <tr>
                   <th class="px-3 py-2 text-left">User</th>
                   <th class="px-3 py-2 text-left">Plan</th>
+                  <th class="px-3 py-2 text-left">From</th>
                   <th class="px-3 py-2 text-left">Status</th>
                   <th class="px-3 py-2 text-left">Subscribed</th>
                   <th class="px-3 py-2 text-left">Period ends</th>
@@ -571,6 +572,22 @@
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs font-mono text-purple-300" x-text="planLabel(s.plan, s.isOneTime)"></span>
+                    </td>
+                    <!-- Acquisition channel. Paid and creator traffic are the two
+                         worth spotting at a glance; organic and unknown stay dim so
+                         they do not compete for attention. 'unknown' means the user
+                         predates attribution or sideloaded — NOT that they are organic. -->
+                    <td class="px-3 py-2">
+                      <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
+                        :class="s.channel === 'ads' ? 'bg-sky-950 text-sky-300'
+                              : s.channel === 'influencer' ? 'bg-fuchsia-950 text-fuchsia-300'
+                              : s.channel === 'other' ? 'bg-amber-950 text-amber-300'
+                              : s.channel === 'organic' ? 'bg-slate-800 text-slate-400'
+                              : 'bg-slate-900 text-slate-600'"
+                        x-text="s.channel === 'ads' ? '● ads' : (s.channel || 'unknown')"></span>
+                      <div class="text-[10px] text-slate-500 font-mono mt-0.5"
+                        x-show="s.source && s.source !== 'organic'"
+                        x-text="s.source + (s.medium ? ' / ' + s.medium : '')"></div>
                     </td>
                     <td class="px-3 py-2">
                       <span class="text-xs px-2 py-0.5 rounded font-semibold uppercase tracking-wide"
