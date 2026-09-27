@@ -2254,6 +2254,40 @@ function logLinkClick(src, platform) {
   }, { merge: true }).catch((e) => console.warn('[get] click log failed:', e.message));
 }
 
+// POST /install — one-shot ping from the app's first launch.
+//
+// /get counts TAPS. Play counts installs, but only inside Play Console.
+// This closes the gap in our own dashboard: the app calls this exactly once
+// per install, right after it reads the Play referrer, so taps and installs
+// land in the same link_stats doc and can be read as a rate.
+//
+// Unauthenticated by necessity — it fires before signup, which is the whole
+// point, since an install that never signs up is otherwise invisible to us.
+// It only increments counters: the worst a bad actor achieves is inflating a
+// vanity number. Nothing here grants access, spends money, or reads data.
+//
+// This counts FIRST APP OPEN, not a Play-verified install, so it undercounts
+// anyone who installs and never opens. Play Console stays authoritative.
+app.post('/install', (req, res) => {
+  // Answer immediately — the app must never wait on our bookkeeping.
+  res.status(204).end();
+  if (!firestoreDb) return;
+
+  const b = req.body || {};
+  const src = sanitizeSrc(b.source || 'organic');
+  const medium = sanitizeSrc(b.medium || 'none');
+  const day = new Date().toISOString().slice(0, 10);
+  const inc = firebaseAdmin.firestore.FieldValue.increment(1);
+
+  console.log(`[install] src=${src} medium=${medium}`);
+  firestoreDb.doc(`link_stats/${day}`).set({
+    installTotal: inc,
+    [`install_src_${src}`]: inc,
+    [`install_medium_${medium}`]: inc,
+    updatedAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true }).catch((e) => console.warn('[install] log failed:', e.message));
+});
+
 app.get('/get', (req, res) => {
   const src = sanitizeSrc(req.query.src);
   const ua = req.get('user-agent') || '';
@@ -3993,18 +4027,33 @@ app.get('/admin/api/link-stats', async (req, res) => {
     const snap = await firestoreDb.collection('link_stats').get();
 
     const rows = [];
-    const totals = { total: 0, platforms: {}, sources: {} };
+    const totals = {
+      total: 0, installs: 0,
+      platforms: {}, sources: {},
+      installSources: {}, installMediums: {},
+    };
     snap.forEach((doc) => {
       const d = doc.data() || {};
       const row = {
         date: doc.id,
         total: d.total || 0,
+        installs: d.installTotal || 0,
         platforms: {},
         sources: {},
+        installSources: {},
       };
       for (const [k, v] of Object.entries(d)) {
         if (typeof v !== 'number') continue;
-        if (k.startsWith('platform_')) {
+        // Checked before 'src_' would be reached anyway (these keys start
+        // with 'install_'), but kept first so the intent is obvious.
+        if (k.startsWith('install_src_')) {
+          const s2 = k.slice('install_src_'.length);
+          row.installSources[s2] = v;
+          totals.installSources[s2] = (totals.installSources[s2] || 0) + v;
+        } else if (k.startsWith('install_medium_')) {
+          const m = k.slice('install_medium_'.length);
+          totals.installMediums[m] = (totals.installMediums[m] || 0) + v;
+        } else if (k.startsWith('platform_')) {
           const p = k.slice('platform_'.length);
           row.platforms[p] = v;
           totals.platforms[p] = (totals.platforms[p] || 0) + v;
@@ -4015,6 +4064,7 @@ app.get('/admin/api/link-stats', async (req, res) => {
         }
       }
       totals.total += row.total;
+      totals.installs += row.installs;
       rows.push(row);
     });
 

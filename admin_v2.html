@@ -847,8 +847,12 @@
               <div class="text-xs text-slate-500">iOS</div>
             </div>
             <div class="p-4 rounded-lg bg-slate-900 border border-slate-800">
-              <div class="text-2xl font-bold" x-text="(linkStats?.totals?.platforms?.other ?? 0)"></div>
-              <div class="text-xs text-slate-500">Other</div>
+              <div class="text-2xl font-bold text-sky-300" x-text="linkStats?.totals?.installs ?? 0"></div>
+              <div class="text-xs text-slate-500">
+                Installs
+                <span x-show="(linkStats?.totals?.total ?? 0) > 0" class="text-slate-600"
+                  x-text="' · ' + Math.round(((linkStats?.totals?.installs ?? 0) / (linkStats?.totals?.total || 1)) * 1000) / 10 + '% of taps'"></span>
+              </div>
             </div>
           </div>
 
@@ -861,6 +865,13 @@
                   <span class="font-mono text-purple-300" x-text="src"></span>
                   <span class="text-slate-500"> · </span>
                   <span class="font-semibold" x-text="count"></span>
+                  <span class="text-slate-600 text-xs"> taps</span>
+                  <!-- Installs are keyed by the SAME src token, so a creator's
+                       row reads tap -> install without cross-referencing. -->
+                  <span class="text-slate-700"> → </span>
+                  <span class="font-semibold text-sky-300"
+                    x-text="(linkStats?.totals?.installSources?.[src] ?? 0)"></span>
+                  <span class="text-slate-600 text-xs"> installs</span>
                 </div>
               </template>
             </div>
@@ -874,7 +885,7 @@
                   <th class="text-left px-4 py-2">Date</th>
                   <th class="text-right px-4 py-2">Total</th>
                   <th class="text-right px-4 py-2">Android</th>
-                  <th class="text-right px-4 py-2">iOS</th>
+                  <th class="text-right px-4 py-2">Installs</th>
                   <th class="text-left px-4 py-2">Sources</th>
                 </tr>
               </thead>
@@ -884,7 +895,7 @@
                     <td class="px-4 py-2 font-mono text-xs" x-text="row.date"></td>
                     <td class="px-4 py-2 text-right font-semibold" x-text="row.total"></td>
                     <td class="px-4 py-2 text-right text-slate-400" x-text="row.platforms?.android ?? 0"></td>
-                    <td class="px-4 py-2 text-right text-slate-400" x-text="row.platforms?.ios ?? 0"></td>
+                    <td class="px-4 py-2 text-right text-sky-300" x-text="row.installs ?? 0"></td>
                     <td class="px-4 py-2 text-xs text-slate-500"
                       x-text="Object.entries(row.sources||{}).map(([k,v])=>k+':'+v).join('  ')"></td>
                   </tr>
