@@ -1123,7 +1123,28 @@
               return;
             }
             if (!r.ok) {
-              this.error = 'Server returned ' + r.status;
+              // Show the server's ACTUAL message, not just the status code.
+              // /admin/api/overview returns { error, indexUrl?, hint? } —
+              // rendering only "Server returned 500" is what forced a
+              // devtools round-trip every time this broke.
+              let detail = '';
+              try {
+                const body = await r.json();
+                detail = body.error || '';
+                if (body.hint) detail += ' — ' + body.hint;
+                if (body.indexUrl) detail += ' | create index: ' + body.indexUrl;
+              } catch (_) {
+                detail = (await r.text().catch(() => '')).slice(0, 300);
+              }
+              this.error = 'Overview failed (' + r.status + ')' + (detail ? ': ' + detail : '');
+
+              // A broken overview must NOT lock the whole console. 403 is
+              // already handled above, so reaching here means the token is
+              // valid and this admin is entitled — let them in so chats,
+              // subscriptions and feedback stay usable while overview is
+              // down. Every overview block is x-show="!loading && overview"
+              // guarded, so the panel just renders empty.
+              this.phase = 'app';
               return;
             }
             this.overview = await r.json();

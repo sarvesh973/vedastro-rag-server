@@ -4012,7 +4012,18 @@ app.get('/admin/api/overview', async (req, res) => {
     });
   } catch (e) {
     console.error('[admin/overview]', e);
-    res.status(500).json({ error: e.message });
+    // Same index-link recovery as /admin/api/chats/{recent,top-users}.
+    // Without it a missing collection-group index surfaces here as a bare
+    // message with no way to act on it, which is what made the dashboard's
+    // 500 look unexplainable rather than one-click fixable.
+    const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
+    res.status(500).json({
+      error: e.message,
+      indexUrl: urlMatch ? urlMatch[0] : null,
+      hint: urlMatch
+        ? 'Firestore needs a one-time collection-group index. Click "Create index" then retry in ~1 min.'
+        : undefined,
+    });
   }
 });
 
