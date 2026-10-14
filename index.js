@@ -1132,9 +1132,19 @@ function calculateChart(birthDate, birthTime, lat, lon) {
     //
     // Flattened across mahadasha boundaries so "what comes next" does not
     // stop dead at the end of the current mahadasha.
-    const fmtLong = (d) => new Date(d).toLocaleDateString('en-IN', {
-      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
-    });
+    // Dasha boundaries are instants, not days — a mahadasha can end at
+    // 20:22:43 on its last date. Formatting to day precision threw that
+    // away, so answers could only ever say "4 July 2045" while the
+    // computed value knew the exact second. Users comparing against other
+    // jyotish software read the missing precision as vagueness.
+    //
+    // luxon rather than toLocaleString: we need the exact shape
+    // "4 July 2045 at 14:22:43 +05:30" with a 24h clock and a numeric
+    // offset, and Intl's en-IN output for those options is neither
+    // stable nor 24-hour.
+    const fmtLong = (d) => DateTime.fromJSDate(new Date(d))
+      .setZone('Asia/Kolkata')
+      .toFormat("d LLLL yyyy 'at' HH:mm:ss ZZ");
     // House lords, so a timing answer can key off the house that actually
     // governs the question. houses[n-1].rashi is the sign number (1=Aries).
     // Rahu and Ketu rule nothing here - classical lordship only.
