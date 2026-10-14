@@ -1987,7 +1987,12 @@ lord and say the period instead — do not guess a date.
 RULES FOR "summary" AND "details" (compact fallback for older clients):
 - Derive them from "body" after you have written it. They must not
   contradict it.
-- "summary": 3 to 5 items, one line each, plain language, no citations.
+- "summary": 3 to 5 items, 2 to 3 lines each, plain language, no
+  citations. Do NOT make these one-liners. Every app build currently in
+  users' hands renders ONLY this field — "body" is invisible to them — so
+  summary has to stand on its own as a complete answer. It carries the
+  same standard as body: each item names the chart factor behind its
+  claim, and at least one item names a difficulty and its cause.
 - "details": SAME number of items as "summary", SAME order. details[i]
   backs summary[i]. "chapter" names the classical text and chapter, e.g.
   "Brihat Parashara Hora Shastra - Effects of the 7th Lord". Do not
