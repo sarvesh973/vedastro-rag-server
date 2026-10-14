@@ -1171,6 +1171,13 @@ function calculateChart(birthDate, birthTime, lat, lon) {
         nakshatra: data.nakshatra,
         house: houseNum || 'unknown',
         isRetrograde: data.isRetrograde || false,
+        // Raw sidereal longitude. isCombust() in lib/rules/schema.js needs
+        // both the planet's and the Sun's longitude as numbers; without it
+        // every combustion check silently returned false, so no rule
+        // depending on combustion could ever fire for a real user. The
+        // validation context carried longitude all along, which is why the
+        // rule suite never caught it.
+        longitude: data.longitude,
       };
     }
 
