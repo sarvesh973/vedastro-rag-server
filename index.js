@@ -4,6 +4,19 @@ const fs = require('fs');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { getKundli, Observer } = require('@prisri/jyotish');
+// Correct the library's Lahiri ayanamsa before ANY chart is computed. It
+// is 16.111 arcsec off its own defining epoch, which lands as roughly two
+// days of error on every dasha boundary we print. Self-disables once the
+// upstream fix (prisriorg/jyotish#1) ships. See lib/ayanamsa-correction.js.
+const { applyAyanamsaCorrection } = require('./lib/ayanamsa-correction');
+const _ayanamsaFix = applyAyanamsaCorrection();
+console.log(
+  `[ayanamsa] ${_ayanamsaFix.applied ? 'CORRECTED' : 'not applied'}: ` +
+  `${_ayanamsaFix.reason}` +
+  (_ayanamsaFix.errorArcsec !== null
+    ? ` (epoch error ${_ayanamsaFix.errorArcsec.toFixed(3)}")`
+    : ''),
+);
 const { computeAshtakavarga } = require('./lib/ashtakavarga');
 const { detectAllYogas } = require('./lib/yogas');
 const { computeKarakas } = require('./lib/karakas');
