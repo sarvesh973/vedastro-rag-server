@@ -1002,6 +1002,11 @@ async function generateResponse(prompt, opts) {
 const CHAT_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
+    // The full markdown reading. Added alongside summary/details rather
+    // than replacing them: app versions already in the field read
+    // summary, and they keep working untouched while newer builds render
+    // body. Required in the schema so the model always produces it.
+    body: { type: 'string' },
     summary: {
       type: 'array',
       items: { type: 'string' },
@@ -1018,7 +1023,7 @@ const CHAT_RESPONSE_SCHEMA = {
       },
     },
   },
-  required: ['summary'],
+  required: ['body', 'summary'],
 };
 
 // =========================================
@@ -1191,33 +1196,39 @@ function calculateChart(birthDate, birthTime, lat, lon) {
       };
     }
 
-    // Divisional chart summaries
-    const d9Summary = {};
-    if (chart.vargas?.d9) {
-      for (const [name, data] of Object.entries(chart.vargas.d9.planets || {})) {
+    // Divisional chart summaries.
+    //
+    // Each varga answers a different question. Sending only D9/D10/D20
+    // meant money, property and children questions were answered from the
+    // rashi chart alone — the most generic source available — while the
+    // library had already computed the relevant varga and thrown it away.
+    //
+    //   D2  Hora          wealth, cash flow
+    //   D4  Chaturthamsa  property, fixed assets, home
+    //   D7  Saptamsa      children, progeny
+    //   D9  Navamsha      marriage, and every planet's underlying strength
+    //   D10 Dasamsa       career, profession
+    //   D20 Vimshamsha    spirituality, sadhana
+    //
+    // formatChartForPrompt sends D9+D10 always and the topic's own varga
+    // on top, so the prompt gains precision without gaining bulk.
+    const vargaSummary = (key) => {
+      const v = chart.vargas?.[key];
+      if (!v) return {};
+      const out = {};
+      for (const [name, data] of Object.entries(v.planets || {})) {
         if (['Uranus', 'Neptune', 'Pluto'].includes(name)) continue;
-        d9Summary[name] = data.rashiName;
+        out[name] = data.rashiName;
       }
-      d9Summary['Ascendant'] = chart.vargas.d9.ascendant?.rashiName;
-    }
-
-    const d10Summary = {};
-    if (chart.vargas?.d10) {
-      for (const [name, data] of Object.entries(chart.vargas.d10.planets || {})) {
-        if (['Uranus', 'Neptune', 'Pluto'].includes(name)) continue;
-        d10Summary[name] = data.rashiName;
-      }
-      d10Summary['Ascendant'] = chart.vargas.d10.ascendant?.rashiName;
-    }
-
-    const d20Summary = {};
-    if (chart.vargas?.d20) {
-      for (const [name, data] of Object.entries(chart.vargas.d20.planets || {})) {
-        if (['Uranus', 'Neptune', 'Pluto'].includes(name)) continue;
-        d20Summary[name] = data.rashiName;
-      }
-      d20Summary['Ascendant'] = chart.vargas.d20.ascendant?.rashiName;
-    }
+      if (v.ascendant?.rashiName) out['Ascendant'] = v.ascendant.rashiName;
+      return out;
+    };
+    const d2Summary = vargaSummary('d2');
+    const d4Summary = vargaSummary('d4');
+    const d7Summary = vargaSummary('d7');
+    const d9Summary = vargaSummary('d9');
+    const d10Summary = vargaSummary('d10');
+    const d20Summary = vargaSummary('d20');
 
     // Ashtakavarga — the classical predictive scoring system. Every
     // house gets a Sarvashtaka score (0-56) telling the LLM which
@@ -1281,6 +1292,9 @@ function calculateChart(birthDate, birthTime, lat, lon) {
         })),
       },
       birthNakshatra: chart.dasha.birthNakshatra,
+      d2Hora: d2Summary,
+      d4Chaturthamsa: d4Summary,
+      d7Saptamsa: d7Summary,
       d9Navamsha: d9Summary,
       d10Dasamsa: d10Summary,
       d20Vimshamsha: d20Summary,
@@ -1370,7 +1384,24 @@ function buildTimingBlock(chart, topic) {
 // children all came back with the same current-antardasha date. When a
 // topic-specific window is available it is the only timing source the
 // model should see.
-function formatChartForPrompt(chart, suppressGeneric) {
+// Combustion (astangata) orbs in degrees from the Sun, per BPHS. Mercury
+// and Venus take a tighter orb when retrograde — a distinction the rule
+// engine's flat COMBUST_ORB map does not make.
+const COMBUST_ORB_DIRECT = { Moon: 12, Mars: 17, Mercury: 14, Jupiter: 11, Venus: 10, Saturn: 15 };
+const COMBUST_ORB_RETRO = { Mercury: 12, Venus: 8 };
+
+/** Degrees from the Sun, or null when longitudes are unavailable. */
+function combustionGap(planets, name) {
+  const p = planets[name];
+  const sun = planets.Sun;
+  if (!p || !sun) return null;
+  if (typeof p.longitude !== 'number' || typeof sun.longitude !== 'number') return null;
+  let diff = Math.abs(p.longitude - sun.longitude) % 360;
+  if (diff > 180) diff = 360 - diff;
+  return diff;
+}
+
+function formatChartForPrompt(chart, suppressGeneric, topic) {
   if (!chart) return '';
 
   let text = `\n\nUSER'S BIRTH CHART (Calculated):`;
@@ -1379,7 +1410,18 @@ function formatChartForPrompt(chart, suppressGeneric) {
 
   text += `\n\nPLANETARY POSITIONS (D1 Rashi Chart):`;
   for (const [name, data] of Object.entries(chart.planets)) {
-    text += `\n- ${name}: ${data.sign} (${data.degree}°) in House ${data.house}, Nakshatra: ${data.nakshatra}${data.isRetrograde ? ' [RETROGRADE]' : ''}`;
+    // Combustion was computed nowhere and shown nowhere, so the model
+    // could never name an affliction every other jyotish reading leads
+    // with. It is one of the few genuinely concrete cautions available.
+    let combustTag = '';
+    if (name !== 'Sun' && name !== 'Rahu' && name !== 'Ketu') {
+      const orb = (data.isRetrograde && COMBUST_ORB_RETRO[name]) || COMBUST_ORB_DIRECT[name];
+      const gap = combustionGap(chart.planets, name);
+      if (orb && gap !== null && gap <= orb) {
+        combustTag = ` [COMBUST — ${gap.toFixed(1)}° from Sun, orb ${orb}°]`;
+      }
+    }
+    text += `\n- ${name}: ${data.sign} (${data.degree}°) in House ${data.house}, Nakshatra: ${data.nakshatra}${data.isRetrograde ? ' [RETROGRADE]' : ''}${combustTag}`;
   }
 
   text += `\n\nCURRENT DASHA PERIOD:`;
@@ -1412,15 +1454,38 @@ function formatChartForPrompt(chart, suppressGeneric) {
     text += `\n- ${name}: ${sign}`;
   }
 
-  text += `\n\nVIMSHAMSHA (D20 - Spirituality) Chart:`;
-  for (const [name, sign] of Object.entries(chart.d20Vimshamsha)) {
-    text += `\n- ${name}: ${sign}`;
+  // Topic's own varga, on top of the D9/D10 sent for every question.
+  // Previously only D20 was appended regardless of topic, so a money
+  // question got the spirituality chart and no Hora.
+  const TOPIC_VARGA = {
+    finance: ['d2Hora', 'HORA (D2 - Wealth & Cash Flow)'],
+    wealth: ['d2Hora', 'HORA (D2 - Wealth & Cash Flow)'],
+    property: ['d4Chaturthamsa', 'CHATURTHAMSA (D4 - Property & Fixed Assets)'],
+    children: ['d7Saptamsa', 'SAPTAMSA (D7 - Children & Progeny)'],
+    spirituality: ['d20Vimshamsha', 'VIMSHAMSHA (D20 - Spirituality)'],
+  };
+  const extra = TOPIC_VARGA[String(topic || '').toLowerCase()]
+    // Classifier topics are free-form ("marriage_timing", "career_change"),
+    // so fall back to a prefix match before giving up.
+    || TOPIC_VARGA[Object.keys(TOPIC_VARGA)
+      .find(k => String(topic || '').toLowerCase().startsWith(k)) || ''];
+  if (extra && chart[extra[0]] && Object.keys(chart[extra[0]]).length > 0) {
+    text += `\n\n${extra[1]} Chart:`;
+    for (const [name, sign] of Object.entries(chart[extra[0]])) {
+      text += `\n- ${name}: ${sign}`;
+    }
   }
 
-  text += `\n\nHOUSES:`;
+  text += `\n\nHOUSES (with lord — the lord's own placement above is what`
+    + ` governs that house's results):`;
+  const lords = (chart.dasha && chart.dasha.houseLords) || [];
   for (const h of chart.houses) {
-    const pList = h.planets.length > 0 ? ` (${h.planets.join(', ')})` : '';
-    text += `\n- House ${h.number}: ${h.sign}${pList}`;
+    const pList = h.planets.length > 0 ? ` occupied by ${h.planets.join(', ')}` : ' (empty)';
+    // houseLords was computed in calculateChart and never shown, so the
+    // model had to derive lordship from sign alone and usually didn't —
+    // which is why answers rarely said "your 10th lord is X".
+    const lord = lords[h.number - 1];
+    text += `\n- House ${h.number}: ${h.sign}${lord ? `, lord ${lord}` : ''}${pList}`;
   }
 
   // ─── CURRENT TRANSITS — the strongest event-timing signal ───
@@ -1824,7 +1889,7 @@ different planet.
   // compute one, the generic chart-wide block only as fallback.
   const timingBlock = chartData ? buildTimingBlock(chartData, topic) : '';
   const chartContext = chartData
-    ? formatChartForPrompt(chartData, !!timingBlock) + timingBlock
+    ? formatChartForPrompt(chartData, !!timingBlock, topic) + timingBlock
     : '';
 
   const historyContext = chatHistory && chatHistory.length > 0
@@ -1842,37 +1907,78 @@ OUTPUT FORMAT - STRICT, RETURN ONLY JSON:
 Return a SINGLE JSON object, nothing else, exactly this shape:
 
 {
-  "summary": [
-    "A 2 to 3 line point in plain language. The headline insight only.",
-    "Another 2 to 3 line point.",
-    "..."
-  ],
+  "body": "The full reading, in markdown. THIS is what the user reads.",
+  "summary": ["short point", "short point", "..."],
   "details": [
     {
       "chapter": "Brihat Parashara Hora Shastra - 10th House of Karma",
-      "explanation": "The FULL detailed reasoning behind summary point 1: which planet, which house, which dasha, why this result. 3 to 6 sentences."
-    },
-    {
-      "chapter": "Phaladeepika - Dasha Phala",
-      "explanation": "Full reasoning behind summary point 2."
+      "explanation": "Reasoning behind summary point 1: which planet, which house, which dasha, why. 3 to 6 sentences."
     }
   ]
 }
 
-RULES FOR THE JSON:
-- "summary" has 3 to 5 items. Each item is 2 to 3 lines: the headline
-  prediction/observation in plain language. Do NOT cram the full
-  reasoning here, keep each one short and scannable.
-- "details" has EXACTLY the same number of items as "summary", in the
-  SAME ORDER. details[i] is the deep-dive for summary[i].
-- details[i].chapter: name the classical text + the relevant chapter or
-  topic, e.g. "Brihat Parashara Hora Shastra - Effects of the 7th Lord".
-  Do not invent verse numbers you were not given; name chapters/topics.
-- details[i].explanation: the full astrological reasoning that backs
-  that summary point - the planet, house, dasha, and why. This is the
-  long part. 3 to 6 sentences.
-- Do NOT put book names or citations inside "summary" - those belong
-  only in "details".
+=== "body" IS THE ANSWER. Write it first; spend your effort here. ===
+
+STRUCTURE OF "body":
+- Open with ONE short paragraph giving the verdict. No heading. Say what
+  is actually true for this person, not a greeting.
+- Then 2 to 4 sections, each introduced by a markdown heading: "## Title".
+  Title them for THIS question, not generically. "## Business outlook",
+  "## How progress unfolds", "## November 2026", "## Money and cash flow",
+  "## The challenge", "## Bottom line" are good. "## Analysis" is not.
+- Inside a section: a short paragraph of reasoning, then a "- " bullet
+  list when you have 3+ parallel items (chart factors, or actions).
+- Use **bold** for the verdict phrase and for planet/dasha names the user
+  should notice. Do not bold whole sentences.
+- Blank line between every paragraph, heading and list.
+- Length: 450-650 words for a real question. A short follow-up
+  ("Kab?", "aur batao") gets 2-3 sentences and NO headings.
+
+THE RULE THAT MATTERS MOST — EVERY CLAIM NAMES ITS CAUSE:
+Never state an outcome without naming the chart factor that produces it.
+Each sentence of substance should be readable as "<chart factor>, so
+<consequence>". If you cannot name the factor, delete the sentence.
+
+  BANNED (generic — could be said to anyone):
+    "Your intelligence and communication skills will help you."
+    "This is a favourable time for career growth."
+    "Kuch chunautiyan bhi aa sakti hain."
+    "November ka mahina anukool dikh raha hai."
+  REQUIRED (specific — only true of THIS chart):
+    "Your 10th lord Saturn sits in the 3rd with Mercury and Venus, so
+     income comes through written and technical work that compounds
+     slowly rather than one breakthrough."
+    "Mercury is combust in that same 3rd house, so check analytics, ad
+     settings and written pricing twice this month — small measurement
+     errors turn into rework."
+
+ANSWER THE QUESTION THAT WAS ASKED:
+- Reuse the user's own nouns. If they said "development and performance
+  marketing", your advice is about tracking, funnels, ad spend, retainers
+  and client systems — NOT "career" in the abstract.
+- If they named a month or period, give that period its own section.
+- Bullets are things that happen or things to do. Not adjectives.
+
+NAME THE DIFFICULTY, WITH ITS CAUSE:
+Every reading must say what is hard, and why, in chart terms. A reading
+with no difficulty named is a failed reading. Use the matched rules of
+negative polarity, combustion, debilitation, malefic placements and
+Saturn transits. "Challenges may come" is not naming a difficulty.
+
+DATES:
+Copy dates EXACTLY from the CURRENT DASHA PERIOD and TIMING ANSWER blocks,
+including the time and offset when given. NEVER compute, estimate, round
+or invent a date. If no computed date supports your point, name the dasha
+lord and say the period instead — do not guess a date.
+
+RULES FOR "summary" AND "details" (compact fallback for older clients):
+- Derive them from "body" after you have written it. They must not
+  contradict it.
+- "summary": 3 to 5 items, one line each, plain language, no citations.
+- "details": SAME number of items as "summary", SAME order. details[i]
+  backs summary[i]. "chapter" names the classical text and chapter, e.g.
+  "Brihat Parashara Hora Shastra - Effects of the 7th Lord". Do not
+  invent verse numbers you were not given.
 - Return ONLY the JSON object. No markdown fences, no text before/after.
 
 CONVERSATION RULES:
@@ -1895,7 +2001,9 @@ CONVERSATION RULES:
   The only time it is OK to hedge is if CURRENT DASHA PERIOD is genuinely absent from the chart context above (the user has no birth-time on file). Then you may say "exact dasha needs your birth time".
 - If the user asks a META-question about you, the system, the books used, or "how do you work", answer plainly in 1-2 sentences (still in JSON format with summary=[answer] details=[]). Do not force astrology verses into a meta answer. You are based on Brihat Parashara Hora Shastra (BPHS) and Phaladeepika.
 - If the user requests a different language in THIS message ("reply in English", "Hindi mein bolo"), honor it for this reply only. Otherwise follow the default language directive below.
-- Keep the total content (all summary + all explanations) under ~320 words.
+- Length is governed by the "body" spec above (450-650 words for a real
+  question, 2-3 sentences for a short follow-up). "summary" and "details"
+  are the compact fallback and stay brief regardless.
 - HONEST CALIBRATION — match the tone to what the matched rules actually
   show. When the chart points to a strong positive signal, reflect it
   confidently. When it points to a difficult period (negative-polarity
@@ -3166,10 +3274,14 @@ app.post('/chat', async (req, res) => {
     // suspenders in case Gemini ever fails the schema constraint.
     let summary = [];
     let details = [];
+    let body = '';
     const clean = raw.replace(/```json?/gi, '').replace(/```/g, '').trim();
 
     const applyParsed = (parsed) => {
       let ok = false;
+      if (parsed && typeof parsed.body === 'string' && parsed.body.trim()) {
+        body = parsed.body.trim();
+      }
       if (parsed && Array.isArray(parsed.summary)) {
         summary = parsed.summary.map(x => String(x).trim()).filter(Boolean);
         ok = summary.length > 0;
@@ -3247,7 +3359,15 @@ app.post('/chat', async (req, res) => {
     if (chartData) {
       try {
         const { checkAnswerFidelity, fidelityLogLine, buildCorrectionPrompt } = require('./lib/answer-fidelity');
-        const fullText = () => summary.join(' ') + ' ' + details.map(d => d.explanation).join(' ');
+        // body is included deliberately: it is the text the user actually
+        // reads, it is the longest part, and it therefore carries the most
+        // hallucination risk. Validating only summary/details would check
+        // the fallback and ignore the answer.
+        const fullText = () => [
+          body,
+          summary.join(' '),
+          details.map(d => d.explanation).join(' '),
+        ].filter(Boolean).join(' ');
         fidelity = checkAnswerFidelity(fullText(), chartData);
         console[fidelity.mismatch ? 'warn' : 'log'](fidelityLogLine(fidelity));
 
@@ -3337,6 +3457,10 @@ app.post('/chat', async (req, res) => {
 
     return res.json({
       answer,
+      // The sectioned markdown reading. Clients that know about it render
+      // it; older builds ignore the field and keep using summary/details,
+      // which is why both are still sent.
+      body,
       summary,
       details,
       sources,
