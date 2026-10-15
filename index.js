@@ -453,6 +453,50 @@ async function requireAdmin(req, res) {
 }
 
 // =========================================
+// ADMIN READ CACHE
+// =========================================
+//
+// Opening the dashboard fans out to collection-group scans of chats,
+// subscriptions and payments — several thousand document reads per
+// session, and subscriptions is scanned twice (overview and the
+// subscriptions tab). Reloading the page pays the whole bill again.
+//
+// On Firestore's free tier that is enough to exhaust a day's read quota
+// in a couple of page loads, after which everything Firestore-backed
+// starts failing — including the app's own plan lookups.
+//
+// These numbers are analytics, not live state. Serving them from memory
+// for a few minutes makes repeat loads cost zero reads. Memory rather
+// than a Firestore doc deliberately: writing the cache would itself
+// consume quota, and losing it on redeploy is harmless.
+//
+// Pass ?fresh=1 to bypass and recompute.
+const _adminCache = new Map();
+const ADMIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function adminCacheGet(req, key) {
+  if (req && req.query && req.query.fresh) return null;
+  const hit = _adminCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > ADMIN_CACHE_TTL_MS) {
+    _adminCache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function adminCacheSet(key, value) {
+  _adminCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** Wraps a cached admin response so the age is visible in the dashboard. */
+function withCacheMeta(value, cached) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return { ...value, _cached: !!cached };
+}
+
+// =========================================
 // RAZORPAY SUBSCRIPTIONS (configured per env)
 // =========================================
 // Plan IDs are created on dashboard.razorpay.com -> Subscriptions -> Plans
@@ -3999,6 +4043,11 @@ app.get('/admin/config', (req, res) => {
 app.get('/admin/api/overview', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  // Heaviest endpoint on the dashboard: three count() aggregations plus
+  // full collection-group scans of subscriptions and payments. Served
+  // from memory for ADMIN_CACHE_TTL_MS so a page reload costs nothing.
+  const _cachedOverview = adminCacheGet(req, 'overview');
+  if (_cachedOverview) return res.json(withCacheMeta(_cachedOverview, true));
   try {
     const [usersAgg, feedbackAgg, reportsAgg] = await Promise.all([
       firestoreDb.collection('users').count().get(),
@@ -4191,7 +4240,7 @@ app.get('/admin/api/overview', async (req, res) => {
       console.warn('[admin/overview] payments query failed:', e.message);
     }
 
-    res.json({
+    res.json(withCacheMeta(adminCacheSet('overview', {
       counts: {
         users: usersAgg.data().count,
         feedback: feedbackAgg.data().count,
@@ -4213,7 +4262,7 @@ app.get('/admin/api/overview', async (req, res) => {
         retention,
         earnings,
       },
-    });
+    }), false));
   } catch (e) {
     console.error('[admin/overview]', e);
     // Same index-link recovery as /admin/api/chats/{recent,top-users}.
@@ -4237,8 +4286,12 @@ app.get('/admin/api/overview', async (req, res) => {
 app.get('/admin/api/link-stats', async (req, res) => {
   if (!await requireAdmin(req, res)) return;
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
+  // One document per day, so this scan grows forever. Cached by window.
+  const _linkDays = Math.min(parseInt(req.query.days, 10) || 30, 365);
+  const _cached = adminCacheGet(req, `link-stats:${_linkDays}`);
+  if (_cached) return res.json(withCacheMeta(_cached, true));
   try {
-    const days = Math.min(parseInt(req.query.days, 10) || 30, 365);
+    const days = _linkDays;
     const snap = await firestoreDb.collection('link_stats').get();
 
     const rows = [];
@@ -4285,7 +4338,8 @@ app.get('/admin/api/link-stats', async (req, res) => {
 
     // Newest first, capped to the requested window.
     rows.sort((a, b) => (a.date < b.date ? 1 : -1));
-    res.json({ days: rows.slice(0, days), totals });
+    res.json(withCacheMeta(adminCacheSet(`link-stats:${_linkDays}`,
+      { days: rows.slice(0, days), totals }), false));
   } catch (e) {
     console.error('[admin/link-stats]', e);
     res.status(500).json({ error: e.message });
@@ -4385,6 +4439,10 @@ app.get('/admin/api/chats/recent', async (req, res) => {
   if (!firestoreDb) return res.json({ items: [] });
   if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
   const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
+  // Up to `limit` docs plus the same again for each legacy collection —
+  // ~2000 reads on a default load. Cached per limit.
+  const _cached = adminCacheGet(req, `chats-recent:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached, true));
   try {
     const snap = await firestoreDb.collectionGroup('chats')
       .orderBy('timestamp', 'desc').limit(limit).get();
@@ -4444,7 +4502,7 @@ app.get('/admin/api/chats/recent', async (req, res) => {
     }
     for (const r of rows) r.email = emailMap[r.uid] || null;
 
-    res.json({ items: rows });
+    res.json(withCacheMeta(adminCacheSet(`chats-recent:${limit}`, { items: rows }), false));
   } catch (e) {
     console.error('[admin/chats/recent]', e);
     const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
@@ -4467,6 +4525,10 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
   const days = Math.min(Math.max(parseInt(req.query.days || '7', 10), 1), 90);
   const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // The single most expensive query on the dashboard — it pulls up to
+  // 5000 chat documents to aggregate per-user counts. Cached hard.
+  const _cached = adminCacheGet(req, `top-users:${days}:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached, true));
   try {
     // Pull up to 5000 recent chats and aggregate. For larger scale we'd
     // switch to a daily-rollup doc; for now this is plenty.
@@ -4522,7 +4584,7 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
       phoneNumber: emailMap[r.uid] ? emailMap[r.uid].phoneNumber : null,
     }));
 
-    res.json({ days, items });
+    res.json(withCacheMeta(adminCacheSet(`top-users:${days}:${limit}`, { days, items }), false));
   } catch (e) {
     console.error('[admin/chats/top-users]', e);
     const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
@@ -4584,6 +4646,11 @@ app.get('/admin/api/subscriptions', async (req, res) => {
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
   if (!firebaseAdmin) return res.status(503).json({ error: 'firebase-admin not configured' });
   const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000);
+  // Full collection-group scan of every subscription doc — and overview
+  // scans the same collection again, so an uncached dashboard session
+  // pays for it twice.
+  const _cached = adminCacheGet(req, `subscriptions:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached, true));
   try {
     const snap = await firestoreDb.collectionGroup('subscription').get();
     const rows = [];
@@ -4697,7 +4764,8 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       console.warn('[admin/subscriptions] bySource failed:', e.message);
     }
 
-    res.json({ summary, bySource, items: rows.slice(0, limit) });
+    res.json(withCacheMeta(adminCacheSet(`subscriptions:${limit}`,
+      { summary, bySource, items: rows.slice(0, limit) }), false));
   } catch (e) {
     console.error('[admin/subscriptions]', e);
     res.status(500).json({ error: e.message });
