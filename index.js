@@ -22,6 +22,10 @@ const { detectAllYogas } = require('./lib/yogas');
 const { computeKarakas } = require('./lib/karakas');
 const { computeShadbala } = require('./lib/shadbala');
 const { computeTransits } = require('./lib/transits');
+// Required up here, not beside the route modules at the bottom: the cache
+// is constructed at module top level a few hundred lines below, and a const
+// cannot be used before its declaration is evaluated.
+const { createAdminCache } = require('./lib/admin-cache');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
 // timezone, luxon converts local birth time -> UTC with historical DST.
 const { find: geoTzFind } = require('geo-tz');
@@ -471,29 +475,118 @@ async function requireAdmin(req, res) {
 // consume quota, and losing it on redeploy is harmless.
 //
 // Pass ?fresh=1 to bypass and recompute.
-const _adminCache = new Map();
-const ADMIN_CACHE_TTL_MS = 5 * 60 * 1000;
+// 30 minutes, not 5. These are business metrics, not a live feed — nobody
+// needs MRR to the minute, and every expiry costs thousands of document
+// reads. `?fresh=1` is there for when you genuinely need it now.
+// Overridable so it can be tuned without a deploy.
+const ADMIN_CACHE_TTL_MS = Number(process.env.ADMIN_CACHE_TTL_MS || 30 * 60 * 1000);
 
-function adminCacheGet(req, key) {
-  if (req && req.query && req.query.fresh) return null;
-  const hit = _adminCache.get(key);
-  if (!hit) return null;
-  if (Date.now() - hit.at > ADMIN_CACHE_TTL_MS) {
-    _adminCache.delete(key);
-    return null;
+// The implementation, and the reasoning behind the two levels, live in
+// lib/admin-cache.js — index.js has an unconditional app.listen(), so
+// nothing defined in this file can be required from a test.
+//
+// getDb is a thunk because firestoreDb is assigned during startup, below
+// this point; capturing the value here would pin it to null forever.
+const _adminCacheApi = createAdminCache({
+  getDb: () => firestoreDb,
+  ttlMs: ADMIN_CACHE_TTL_MS,
+  maxRecomputesPerDay: Number(process.env.ADMIN_MAX_RECOMPUTES_PER_DAY || 5),
+});
+const adminCacheGet = (req, key) => _adminCacheApi.get(req, key);
+const adminCacheSet = (key, value) => _adminCacheApi.set(key, value);
+
+/**
+ * Every `subscription/current` doc, once, shared by /admin/api/overview and
+ * /admin/api/subscriptions.
+ *
+ * Both endpoints used to run their own `collectionGroup('subscription').get()`,
+ * so one dashboard tour scanned the whole collection group TWICE for the same
+ * rows. Cached under its own key, so the two endpoints also share the cache
+ * rather than each holding a copy.
+ *
+ * Timestamps are flattened to ISO strings here. Both callers test for
+ * `.toDate()` to recognise a Firestore Timestamp, and that method does not
+ * survive the JSON round trip through the L2 cache — dates would come back
+ * null on a cache hit and only on a cache hit, which is the kind of bug that
+ * looks like bad data rather than bad caching. Strings behave identically on
+ * both paths, and the callers already accept a string.
+ */
+function _isoish(v) {
+  if (v && typeof v.toDate === 'function') {
+    try { return v.toDate().toISOString(); } catch (_) { return null; }
   }
-  return hit.value;
+  return v;
 }
 
-function adminCacheSet(key, value) {
-  _adminCache.set(key, { at: Date.now(), value });
-  return value;
+async function loadSubscriptionRows(req) {
+  const cached = await adminCacheGet(req, 'subs-raw');
+  if (cached && cached.value && Array.isArray(cached.value.rows)) {
+    return cached.value.rows;
+  }
+
+  const snap = await firestoreDb.collectionGroup('subscription').get();
+  const rows = [];
+  for (const doc of snap.docs) {
+    if (doc.id !== 'current') continue;
+    const uid = doc.ref.parent.parent ? doc.ref.parent.parent.id : null;
+    if (!uid) continue;
+    const raw = doc.data() || {};
+    const data = {};
+    for (const k of Object.keys(raw)) data[k] = _isoish(raw[k]);
+    rows.push({ uid, data });
+  }
+  await adminCacheSet('subs-raw', { rows });
+  return rows;
 }
 
-/** Wraps a cached admin response so the age is visible in the dashboard. */
-function withCacheMeta(value, cached) {
+/**
+ * uid -> { source, medium } for every user, cached.
+ *
+ * This is a full scan of `users`, and it has to be: it supplies the
+ * DENOMINATOR of the per-source conversion funnel, so every signup must be
+ * counted or the percentages are wrong. `.select('attribution')` trims the
+ * bandwidth but not the read count — Firestore bills one read per document
+ * regardless of how few fields you ask for — so the only honest way to make
+ * this cheap is to do it rarely rather than to do less of it.
+ *
+ * Bounding it with a limit was the obvious move and is the wrong one: it
+ * would quietly shrink the denominator and inflate every creator's
+ * conversion rate, which is worse than a slow dashboard because it looks
+ * like a result.
+ */
+async function loadUserAttribution(req) {
+  const cached = await adminCacheGet(req, 'users-attribution');
+  if (cached && cached.value && cached.value.attr) return cached.value.attr;
+
+  const snap = await firestoreDb.collection('users').select('attribution').get();
+  const attr = {};
+  snap.forEach(doc => {
+    const a = (doc.data() || {}).attribution;
+    attr[doc.id] = {
+      source: (a && a.source) || null,
+      medium: (a && a.medium) || null,
+    };
+  });
+  await adminCacheSet('users-attribution', { attr });
+  return attr;
+}
+
+/**
+ * Wraps an admin response so the dashboard can say how old it is.
+ *
+ * `_stale` means the figures are past the TTL and were served anyway,
+ * because the day's recompute budget is spent. The dashboard must show
+ * that rather than present them as current — a silently stale number is
+ * worse than an obviously old one, because decisions get made on it.
+ */
+function withCacheMeta(value, cached, meta) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  return { ...value, _cached: !!cached };
+  return {
+    ...value,
+    _cached: !!cached,
+    _cachedAt: meta && typeof meta.at === 'number' ? meta.at : Date.now(),
+    _stale: !!(meta && meta.stale),
+  };
 }
 
 // =========================================
@@ -4046,8 +4139,8 @@ app.get('/admin/api/overview', async (req, res) => {
   // Heaviest endpoint on the dashboard: three count() aggregations plus
   // full collection-group scans of subscriptions and payments. Served
   // from memory for ADMIN_CACHE_TTL_MS so a page reload costs nothing.
-  const _cachedOverview = adminCacheGet(req, 'overview');
-  if (_cachedOverview) return res.json(withCacheMeta(_cachedOverview, true));
+  const _cachedOverview = await adminCacheGet(req, 'overview');
+  if (_cachedOverview) return res.json(withCacheMeta(_cachedOverview.value, true, _cachedOverview));
   try {
     const [usersAgg, feedbackAgg, reportsAgg] = await Promise.all([
       firestoreDb.collection('users').count().get(),
@@ -4125,11 +4218,10 @@ app.get('/admin/api/overview', async (req, res) => {
     const activeSubStates = new Set(['active', 'trialing', 'cancelledPending']);
     let subTotal = 0;
     try {
-      const subsSnap = await firestoreDb.collectionGroup('subscription').get();
-      subsSnap.forEach(doc => {
-        if (doc.id !== 'current') return;
+      // Shared with /admin/api/subscriptions — see loadSubscriptionRows.
+      const subRows = await loadSubscriptionRows(req);
+      subRows.forEach(({ data: d }) => {
         subTotal++;
-        const d = doc.data() || {};
         const planRaw = String(d.plan || d.planId || '').toLowerCase();
         const isPremium  = planRaw.includes('premium');
         const isStandard = planRaw.includes('standard');
@@ -4240,7 +4332,7 @@ app.get('/admin/api/overview', async (req, res) => {
       console.warn('[admin/overview] payments query failed:', e.message);
     }
 
-    res.json(withCacheMeta(adminCacheSet('overview', {
+    res.json(withCacheMeta(await adminCacheSet('overview', {
       counts: {
         users: usersAgg.data().count,
         feedback: feedbackAgg.data().count,
@@ -4288,8 +4380,8 @@ app.get('/admin/api/link-stats', async (req, res) => {
   if (!firestoreDb) return res.status(503).json({ error: 'firestore not configured' });
   // One document per day, so this scan grows forever. Cached by window.
   const _linkDays = Math.min(parseInt(req.query.days, 10) || 30, 365);
-  const _cached = adminCacheGet(req, `link-stats:${_linkDays}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  const _cached = await adminCacheGet(req, `link-stats:${_linkDays}`);
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     const days = _linkDays;
     const snap = await firestoreDb.collection('link_stats').get();
@@ -4338,7 +4430,7 @@ app.get('/admin/api/link-stats', async (req, res) => {
 
     // Newest first, capped to the requested window.
     rows.sort((a, b) => (a.date < b.date ? 1 : -1));
-    res.json(withCacheMeta(adminCacheSet(`link-stats:${_linkDays}`,
+    res.json(withCacheMeta(await adminCacheSet(`link-stats:${_linkDays}`,
       { days: rows.slice(0, days), totals }), false));
   } catch (e) {
     console.error('[admin/link-stats]', e);
@@ -4441,8 +4533,8 @@ app.get('/admin/api/chats/recent', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
   // Up to `limit` docs plus the same again for each legacy collection —
   // ~2000 reads on a default load. Cached per limit.
-  const _cached = adminCacheGet(req, `chats-recent:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  const _cached = await adminCacheGet(req, `chats-recent:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     const snap = await firestoreDb.collectionGroup('chats')
       .orderBy('timestamp', 'desc').limit(limit).get();
@@ -4502,7 +4594,7 @@ app.get('/admin/api/chats/recent', async (req, res) => {
     }
     for (const r of rows) r.email = emailMap[r.uid] || null;
 
-    res.json(withCacheMeta(adminCacheSet(`chats-recent:${limit}`, { items: rows }), false));
+    res.json(withCacheMeta(await adminCacheSet(`chats-recent:${limit}`, { items: rows }), false));
   } catch (e) {
     console.error('[admin/chats/recent]', e);
     const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
@@ -4527,8 +4619,8 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   // The single most expensive query on the dashboard — it pulls up to
   // 5000 chat documents to aggregate per-user counts. Cached hard.
-  const _cached = adminCacheGet(req, `top-users:${days}:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  const _cached = await adminCacheGet(req, `top-users:${days}:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     // Pull up to 5000 recent chats and aggregate. For larger scale we'd
     // switch to a daily-rollup doc; for now this is plenty.
@@ -4584,7 +4676,7 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
       phoneNumber: emailMap[r.uid] ? emailMap[r.uid].phoneNumber : null,
     }));
 
-    res.json(withCacheMeta(adminCacheSet(`top-users:${days}:${limit}`, { days, items }), false));
+    res.json(withCacheMeta(await adminCacheSet(`top-users:${days}:${limit}`, { days, items }), false));
   } catch (e) {
     console.error('[admin/chats/top-users]', e);
     const urlMatch = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
@@ -4649,19 +4741,18 @@ app.get('/admin/api/subscriptions', async (req, res) => {
   // Full collection-group scan of every subscription doc — and overview
   // scans the same collection again, so an uncached dashboard session
   // pays for it twice.
-  const _cached = adminCacheGet(req, `subscriptions:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  const _cached = await adminCacheGet(req, `subscriptions:${limit}`);
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
-    const snap = await firestoreDb.collectionGroup('subscription').get();
+    // Shared with /admin/api/overview — see loadSubscriptionRows. Rows
+    // arrive with timestamps already flattened to ISO strings, which toIso
+    // passes through unchanged.
+    const subRows = await loadSubscriptionRows(req);
     const rows = [];
     const toIso = (v) => v && typeof v.toDate === 'function'
       ? v.toDate().toISOString() : (typeof v === 'string' ? v : null);
 
-    for (const doc of snap.docs) {
-      if (doc.id !== 'current') continue;
-      const uid = doc.ref.parent.parent ? doc.ref.parent.parent.id : null;
-      if (!uid) continue;
-      const d = doc.data() || {};
+    for (const { uid, data: d } of subRows) {
       rows.push({
         uid,
         plan: d.plan || d.planId || null,
@@ -4728,18 +4819,19 @@ app.get('/admin/api/subscriptions', async (req, res) => {
     // merging them would flatter every creator.
     const bySource = {};
     try {
-      const usersSnap = await firestoreDb.collection('users')
-        .select('attribution').get();
+      // Cached full scan — see loadUserAttribution for why it stays a full
+      // scan rather than a limited one.
+      const attrMap = await loadUserAttribution(req);
       const sourceOf = new Map();
       const attrOf = new Map();   // uid -> { source, medium } for the row badge
-      usersSnap.forEach(doc => {
-        const a = (doc.data() || {}).attribution;
-        attrOf.set(doc.id, { source: (a && a.source) || null, medium: (a && a.medium) || null });
-        sourceOf.set(doc.id, (a && a.source) ? a.source : 'unknown');
-        const s = sourceOf.get(doc.id);
+      for (const uid of Object.keys(attrMap)) {
+        const a = attrMap[uid] || {};
+        attrOf.set(uid, { source: a.source || null, medium: a.medium || null });
+        sourceOf.set(uid, a.source ? a.source : 'unknown');
+        const s = sourceOf.get(uid);
         bySource[s] = bySource[s] || { signups: 0, subscribers: 0, active: 0 };
         bySource[s].signups++;
-      });
+      }
       const alive = new Set(['active', 'trialing', 'paused']);
       for (const r of rows) {
         const s = sourceOf.get(r.uid) || 'unknown';
@@ -4764,7 +4856,7 @@ app.get('/admin/api/subscriptions', async (req, res) => {
       console.warn('[admin/subscriptions] bySource failed:', e.message);
     }
 
-    res.json(withCacheMeta(adminCacheSet(`subscriptions:${limit}`,
+    res.json(withCacheMeta(await adminCacheSet(`subscriptions:${limit}`,
       { summary, bySource, items: rows.slice(0, limit) }), false));
   } catch (e) {
     console.error('[admin/subscriptions]', e);

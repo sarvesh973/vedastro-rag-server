@@ -108,6 +108,31 @@
 
         <!-- ── OVERVIEW ── -->
         <section x-show="tab === 'overview'">
+          <!-- Cache age + the one control that actually rescans Firestore.
+               Opening and refreshing the dashboard is served from cache, so
+               it is effectively free and unlimited; recomputing is not, and
+               is therefore an explicit action with a server-side daily cap.
+               The age is always shown, because a stale figure presented as
+               current is the one failure mode worth designing against. -->
+          <div x-show="!loading && overview"
+               class="flex items-center justify-between mb-4 p-3 rounded-lg border"
+               :class="overview?._stale
+                 ? 'bg-amber-950/40 border-amber-800/60'
+                 : 'bg-slate-900 border-slate-800'">
+            <div class="text-xs"
+                 :class="overview?._stale ? 'text-amber-300' : 'text-slate-500'">
+              <span x-text="'Figures updated ' + cacheAge(overview?._cachedAt)"></span>
+              <span x-show="overview?._stale">
+                · today's recompute budget is spent, so these are the last
+                computed numbers
+              </span>
+            </div>
+            <button @click="recompute()" :disabled="recomputing || loading"
+              class="shrink-0 ml-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-3 py-1.5 rounded text-xs">
+              <span x-text="recomputing ? 'Recomputing…' : 'Recompute'"></span>
+            </button>
+          </div>
+
           <div x-show="loading" class="text-slate-500 text-sm">Loading…</div>
           <div x-show="!loading && overview" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
             <template x-for="c in overviewCards" :key="c.label">
@@ -997,6 +1022,14 @@
           { id: 'links', label: 'Link Clicks', icon: '🔗' },
         ],
         overview: null,
+
+        // When true the next fetchApi call appends ?fresh=1, which is the
+        // only thing that recomputes server-side. Normal loads — including
+        // every per-panel Refresh button — are served from cache at about
+        // one Firestore read, so they can be used without limit. Set by
+        // "Recompute", cleared as soon as the load finishes.
+        forceFresh: false,
+        recomputing: false,
         reports: [],
         feedback: [],
         signups: [],
@@ -1101,8 +1134,41 @@
           this.lookupResult = null;
         },
 
+        /** Human "3h ago" for the cache age banner. */
+        cacheAge(ms) {
+          if (!ms) return '';
+          const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+          if (s < 90) return 'just now';
+          const m = Math.round(s / 60);
+          if (m < 90) return m + 'm ago';
+          const h = Math.round(m / 60);
+          if (h < 36) return h + 'h ago';
+          return Math.round(h / 24) + 'd ago';
+        },
+
+        /**
+         * Recompute server-side, then reload. This is the expensive path —
+         * it rescans Firestore — so it is a deliberate button rather than
+         * something a page load can trigger. The server caps it per day and
+         * will keep serving the last good figures once that cap is reached.
+         */
+        async recompute() {
+          if (this.recomputing) return;
+          this.recomputing = true;
+          this.forceFresh = true;
+          try {
+            await this.checkAdminAndLoad();
+          } finally {
+            this.forceFresh = false;
+            this.recomputing = false;
+          }
+        },
+
         async fetchApi(path, opts = {}) {
           const token = await window.__moksha.getToken();
+          if (this.forceFresh) {
+            path += (path.includes('?') ? '&' : '?') + 'fresh=1';
+          }
           return fetch(path, {
             ...opts,
             headers: {

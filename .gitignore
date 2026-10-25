@@ -3,3 +3,7 @@ node_modules/
 .env.*
 data/books/*.pdf
 data/ingest-state.json
+
+# Local one-off diagnostic script; reads its key from .gitignored
+# .env.probe. Useful on a dev machine, no business in the deploy.
+check-gemini.js
