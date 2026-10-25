@@ -598,6 +598,14 @@ const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
 const RAZORPAY_PLAN_PASS = process.env.RAZORPAY_PLAN_PASS || 'plan_pass_49_weekly_placeholder';
+// Razorpay Offer id that discounts the FIRST cycle of the Pass to ₹49
+// against a ₹99/week plan. Unset means no introductory pricing: the plan
+// charges its own rate every cycle, and the app must keep showing a flat
+// price (kPassIntroPricingLive stays false on that side).
+//
+// Razorpay applies an offer to a subscription at creation time only, so
+// this cannot be added to subscriptions that already exist.
+const RAZORPAY_OFFER_PASS_INTRO = process.env.RAZORPAY_OFFER_PASS_INTRO || '';
 const RAZORPAY_PLAN_TRIAL = process.env.RAZORPAY_PLAN_TRIAL || 'plan_trial_99_placeholder';
 const RAZORPAY_PLAN_STANDARD = process.env.RAZORPAY_PLAN_STANDARD || 'plan_standard_199_placeholder';
 const RAZORPAY_PLAN_PREMIUM = process.env.RAZORPAY_PLAN_PREMIUM || 'plan_premium_499_placeholder';
@@ -2831,10 +2839,9 @@ app.post('/subscription/create', async (req, res) => {
     const rzp = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
 
     // Trial plan: ₹0 today (just e-mandate setup; bank may auth ~₹1-5
-    // and refund), then ₹99 charges automatically on day 7. After that,
-    // monthly ₹99 until cancelled. start_at delays the first charge.
-    //
-    // Standard / Premium: charges immediately (no start_at).
+    // Every tier charges its first cycle immediately — there is no trial
+    // and no start_at delay. (This comment previously described a ₹99
+    // day-7 trial flow that no longer exists.)
     const subscriptionParams = {
       plan_id: planId,
       // Number of billing cycles before Razorpay auto-completes the sub.
@@ -2851,8 +2858,17 @@ app.post('/subscription/create', async (req, res) => {
       },
     };
 
-    // No free trial anymore — all three tiers charge the first month
+    // No free trial anymore — all three tiers charge the first cycle
     // immediately (no start_at delay).
+
+    // Introductory pricing for the Pass: a ₹99/week plan with a
+    // first-cycle offer bringing cycle one to ₹49. Razorpay only accepts
+    // offer_id at creation, and only the first cycle is discounted, so
+    // cycle two onwards bills the plan's own ₹99 — which is exactly what
+    // the app's autopay disclosure tells the user will happen.
+    if (plan === 'pass' && RAZORPAY_OFFER_PASS_INTRO) {
+      subscriptionParams.offer_id = RAZORPAY_OFFER_PASS_INTRO;
+    }
 
     const subscription = await rzp.subscriptions.create(subscriptionParams);
 
