@@ -490,6 +490,7 @@ const ADMIN_CACHE_TTL_MS = Number(process.env.ADMIN_CACHE_TTL_MS || 30 * 60 * 10
 const _adminCacheApi = createAdminCache({
   getDb: () => firestoreDb,
   ttlMs: ADMIN_CACHE_TTL_MS,
+  maxRecomputesPerDay: Number(process.env.ADMIN_MAX_RECOMPUTES_PER_DAY || 5),
 });
 const adminCacheGet = (req, key) => _adminCacheApi.get(req, key);
 const adminCacheSet = (key, value) => _adminCacheApi.set(key, value);
@@ -519,7 +520,9 @@ function _isoish(v) {
 
 async function loadSubscriptionRows(req) {
   const cached = await adminCacheGet(req, 'subs-raw');
-  if (cached && Array.isArray(cached.rows)) return cached.rows;
+  if (cached && cached.value && Array.isArray(cached.value.rows)) {
+    return cached.value.rows;
+  }
 
   const snap = await firestoreDb.collectionGroup('subscription').get();
   const rows = [];
@@ -553,7 +556,7 @@ async function loadSubscriptionRows(req) {
  */
 async function loadUserAttribution(req) {
   const cached = await adminCacheGet(req, 'users-attribution');
-  if (cached && cached.attr) return cached.attr;
+  if (cached && cached.value && cached.value.attr) return cached.value.attr;
 
   const snap = await firestoreDb.collection('users').select('attribution').get();
   const attr = {};
@@ -568,10 +571,22 @@ async function loadUserAttribution(req) {
   return attr;
 }
 
-/** Wraps a cached admin response so the age is visible in the dashboard. */
-function withCacheMeta(value, cached) {
+/**
+ * Wraps an admin response so the dashboard can say how old it is.
+ *
+ * `_stale` means the figures are past the TTL and were served anyway,
+ * because the day's recompute budget is spent. The dashboard must show
+ * that rather than present them as current — a silently stale number is
+ * worse than an obviously old one, because decisions get made on it.
+ */
+function withCacheMeta(value, cached, meta) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  return { ...value, _cached: !!cached };
+  return {
+    ...value,
+    _cached: !!cached,
+    _cachedAt: meta && typeof meta.at === 'number' ? meta.at : Date.now(),
+    _stale: !!(meta && meta.stale),
+  };
 }
 
 // =========================================
@@ -4125,7 +4140,7 @@ app.get('/admin/api/overview', async (req, res) => {
   // full collection-group scans of subscriptions and payments. Served
   // from memory for ADMIN_CACHE_TTL_MS so a page reload costs nothing.
   const _cachedOverview = await adminCacheGet(req, 'overview');
-  if (_cachedOverview) return res.json(withCacheMeta(_cachedOverview, true));
+  if (_cachedOverview) return res.json(withCacheMeta(_cachedOverview.value, true, _cachedOverview));
   try {
     const [usersAgg, feedbackAgg, reportsAgg] = await Promise.all([
       firestoreDb.collection('users').count().get(),
@@ -4366,7 +4381,7 @@ app.get('/admin/api/link-stats', async (req, res) => {
   // One document per day, so this scan grows forever. Cached by window.
   const _linkDays = Math.min(parseInt(req.query.days, 10) || 30, 365);
   const _cached = await adminCacheGet(req, `link-stats:${_linkDays}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     const days = _linkDays;
     const snap = await firestoreDb.collection('link_stats').get();
@@ -4519,7 +4534,7 @@ app.get('/admin/api/chats/recent', async (req, res) => {
   // Up to `limit` docs plus the same again for each legacy collection —
   // ~2000 reads on a default load. Cached per limit.
   const _cached = await adminCacheGet(req, `chats-recent:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     const snap = await firestoreDb.collectionGroup('chats')
       .orderBy('timestamp', 'desc').limit(limit).get();
@@ -4605,7 +4620,7 @@ app.get('/admin/api/chats/top-users', async (req, res) => {
   // The single most expensive query on the dashboard — it pulls up to
   // 5000 chat documents to aggregate per-user counts. Cached hard.
   const _cached = await adminCacheGet(req, `top-users:${days}:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     // Pull up to 5000 recent chats and aggregate. For larger scale we'd
     // switch to a daily-rollup doc; for now this is plenty.
@@ -4727,7 +4742,7 @@ app.get('/admin/api/subscriptions', async (req, res) => {
   // scans the same collection again, so an uncached dashboard session
   // pays for it twice.
   const _cached = await adminCacheGet(req, `subscriptions:${limit}`);
-  if (_cached) return res.json(withCacheMeta(_cached, true));
+  if (_cached) return res.json(withCacheMeta(_cached.value, true, _cached));
   try {
     // Shared with /admin/api/overview — see loadSubscriptionRows. Rows
     // arrive with timestamps already flattened to ISO strings, which toIso
