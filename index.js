@@ -26,6 +26,8 @@ const { computeTransits } = require('./lib/transits');
 // is constructed at module top level a few hundred lines below, and a const
 // cannot be used before its declaration is evaluated.
 const { createAdminCache } = require('./lib/admin-cache');
+const { publicPromoConfig, DEFAULTS: PROMO_DEFAULTS } =
+  require('./lib/promo-config');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
 // timezone, luxon converts local birth time -> UTC with historical DST.
 const { find: geoTzFind } = require('geo-tz');
@@ -2593,6 +2595,47 @@ function logLinkClick(src, platform) {
 //
 // This counts FIRST APP OPEN, not a Play-verified install, so it undercounts
 // anyone who installs and never opens. Play Console stays authoritative.
+// GET /promo/config — campaign policy for the launch banner.
+//
+// Read from app_config/promo in Firestore so it can be changed from the
+// console with no deploy and no restart. Cached in-process briefly: this
+// is hit on every app launch, and a cold Render instance reading
+// Firestore on each one would be both slow and billable.
+//
+// The TTL is the kill switch's worst-case latency. 60 seconds means
+// turning a campaign off reaches everyone within a minute of their next
+// launch, which is the entire reason this moved off the client.
+let _promoCache = null;
+const PROMO_CACHE_TTL_MS = 60 * 1000;
+
+app.get('/promo/config', async (req, res) => {
+  const auth = await verifyAuth(req, res);
+  if (!auth) return;
+
+  const now = Date.now();
+  if (_promoCache && now - _promoCache.at < PROMO_CACHE_TTL_MS) {
+    return res.json(_promoCache.value);
+  }
+
+  let raw = null;
+  try {
+    if (firestoreDb) {
+      const doc = await firestoreDb.doc('app_config/promo').get();
+      if (doc.exists) raw = doc.data();
+    }
+  } catch (e) {
+    // A failed read must serve the safe defaults, never an error. The app
+    // falls back to its own cached copy on a non-200, and a campaign that
+    // cannot be read is a campaign that should not run.
+    console.warn('[promo/config] read failed:', e.message);
+    raw = null;
+  }
+
+  const value = publicPromoConfig(raw || PROMO_DEFAULTS);
+  _promoCache = { at: now, value };
+  return res.json(value);
+});
+
 app.post('/install', (req, res) => {
   // Answer immediately — the app must never wait on our bookkeeping.
   res.status(204).end();
