@@ -4138,6 +4138,47 @@ app.get('/admin/config', (req, res) => {
 
 // ─── /admin/api/* JSON endpoints (Firebase Auth + isAdmin gated) ──
 
+// GET /admin/api/billing-config — which Razorpay ids this instance is
+// actually running with.
+//
+// These live in Render's environment, not in the repository, so there is
+// otherwise no way to see them: not from the code, not from a deploy log,
+// and not from the app. A wrong or stale id fails silently — a test-mode
+// plan in a live service, or a plan id left pointing at the old ₹49 plan
+// after the ₹99 one was created — and the first evidence is a user who
+// cannot subscribe, or one charged the wrong amount.
+//
+// Ids are not secrets; they identify a plan, they do not authorise
+// anything. Admin-gated anyway, and no key or secret is reported here.
+app.get('/admin/api/billing-config', async (req, res) => {
+  if (!await requireAdmin(req, res)) return;
+
+  const keyId = process.env.RAZORPAY_KEY_ID || '';
+  res.json({
+    // rzp_test_* vs rzp_live_* is the single most consequential thing to
+    // be able to see, because the two dashboards look identical and ids
+    // from one are silently rejected by the other.
+    mode: keyId.startsWith('rzp_live') ? 'live'
+      : keyId.startsWith('rzp_test') ? 'test'
+      : keyId ? 'unknown' : 'not configured',
+    keyIdPrefix: keyId ? `${keyId.slice(0, 12)}…` : null,
+    plans: {
+      pass: RAZORPAY_PLAN_PASS,
+      trial: RAZORPAY_PLAN_TRIAL,
+      standard: RAZORPAY_PLAN_STANDARD,
+      premium: RAZORPAY_PLAN_PREMIUM,
+    },
+    offers: {
+      // Empty means new Pass subscriptions bill the plan's own rate on
+      // cycle one — no introductory discount is being applied.
+      passIntro: RAZORPAY_OFFER_PASS_INTRO || null,
+    },
+    introPricingActive: !!RAZORPAY_OFFER_PASS_INTRO,
+    secretConfigured: !!process.env.RAZORPAY_KEY_SECRET,
+    webhookSecretConfigured: !!process.env.RAZORPAY_WEBHOOK_SECRET,
+  });
+});
+
 // GET /admin/api/overview — counts, signups, subscription breakdown.
 //
 // Data-location notes (real Firestore paths used by the mobile app):
