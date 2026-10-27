@@ -144,6 +144,56 @@
             </template>
           </div>
 
+          <!-- Razorpay configuration. Read-only: these come from Render's
+               environment and cannot be changed from here, but until now
+               there was no way to SEE them at all. -->
+          <div x-show="!loading && overview" class="p-4 rounded-lg bg-slate-900 border border-slate-800 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <h3 class="font-semibold">Razorpay configuration</h3>
+                <div class="text-xs text-slate-500 mt-1">Set in Render's environment. Read-only here.</div>
+              </div>
+              <button @click="loadBilling()" :disabled="billingLoading"
+                class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded">
+                <span x-text="billingLoading ? 'Checking…' : (billing ? 'Refresh' : 'Check')"></span>
+              </button>
+            </div>
+
+            <div x-show="billing" class="text-sm space-y-1.5">
+              <!-- Mode is the most consequential line: the test and live
+                   dashboards look identical and ids from one are silently
+                   rejected by the other. -->
+              <div class="flex justify-between">
+                <span class="text-slate-500">Mode</span>
+                <span :class="billing?.mode === 'live' ? 'text-emerald-400' : 'text-amber-400'"
+                      x-text="billing?.mode ?? '—'"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Key</span>
+                <span class="font-mono text-xs" x-text="billing?.keyIdPrefix ?? 'not configured'"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Pass plan</span>
+                <span class="font-mono text-xs" x-text="billing?.plans?.pass ?? '—'"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-500">Intro offer</span>
+                <span class="font-mono text-xs"
+                      :class="billing?.offers?.passIntro ? '' : 'text-amber-400'"
+                      x-text="billing?.offers?.passIntro ?? 'not set'"></span>
+              </div>
+              <div class="flex justify-between pt-1 border-t border-slate-800 mt-2">
+                <span class="text-slate-500">₹49 first week active</span>
+                <span :class="billing?.introPricingActive ? 'text-emerald-400' : 'text-amber-400'"
+                      x-text="billing?.introPricingActive ? 'yes' : 'no — Pass bills its full rate on cycle one'"></span>
+              </div>
+            </div>
+
+            <div x-show="!billing && !billingLoading" class="text-xs text-slate-500">
+              Not checked yet.
+            </div>
+          </div>
+
           <!-- Horoscope cache controls -->
           <div x-show="!loading && overview" class="p-4 rounded-lg bg-slate-900 border border-slate-800 mb-4">
             <div class="flex items-center justify-between mb-3">
@@ -1022,6 +1072,8 @@
           { id: 'links', label: 'Link Clicks', icon: '🔗' },
         ],
         overview: null,
+        billing: null,
+        billingLoading: false,
 
         // When true the next fetchApi call appends ?fresh=1, which is the
         // only thing that recomputes server-side. Normal loads — including
@@ -1232,6 +1284,25 @@
           if (t === 'signups' && this.signups.length === 0) await this.loadSignups();
           if (t === 'subs' && this.subscriptions.length === 0) await this.loadSubscriptions();
           if (t === 'links' && !this.linkStats) await this.loadLinkStats();
+        },
+
+        /// Which Razorpay ids this instance is actually running with.
+        ///
+        /// These live in Render's environment, so there is otherwise no
+        /// way to see them from here — and every failure is silent: a
+        /// test-mode id in a live service, or a plan id left on the old
+        /// ₹49 plan, produces no error until a user cannot subscribe or
+        /// is charged the wrong amount.
+        async loadBilling() {
+          this.billingLoading = true;
+          try {
+            const r = await this.fetchApi('/admin/api/billing-config');
+            this.billing = r.ok ? await r.json() : null;
+          } catch (_) {
+            this.billing = null;
+          } finally {
+            this.billingLoading = false;
+          }
         },
 
         async loadLinkStats() {
