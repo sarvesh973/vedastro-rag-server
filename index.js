@@ -2620,8 +2620,28 @@ app.get('/promo/config', async (req, res) => {
   let raw = null;
   try {
     if (firestoreDb) {
-      const doc = await firestoreDb.doc('app_config/promo').get();
-      if (doc.exists) raw = doc.data();
+      const ref = firestoreDb.doc('app_config/promo');
+      const doc = await ref.get();
+      if (doc.exists) {
+        raw = doc.data();
+      } else {
+        // Seed it with the safe defaults on first read.
+        //
+        // Without this the document simply does not exist, and the only
+        // way to configure a campaign is to hand-author it in the
+        // console with exactly the right field names — which is a
+        // guessing game, and a typo'd key reads as "unset" rather than
+        // as an error. Writing it once makes the schema visible: every
+        // switch is there, spelled correctly, with its default, ready to
+        // be edited.
+        //
+        // Safe to do on a GET because DEFAULTS have the campaign OFF, so
+        // seeding can only ever produce a disabled config. It happens
+        // once; afterwards the document exists and this branch is dead.
+        raw = { ...PROMO_DEFAULTS, seededAt: new Date().toISOString() };
+        await ref.set(raw, { merge: true });
+        console.log('[promo/config] seeded app_config/promo with defaults');
+      }
     }
   } catch (e) {
     // A failed read must serve the safe defaults, never an error. The app
@@ -2631,7 +2651,13 @@ app.get('/promo/config', async (req, res) => {
     raw = null;
   }
 
-  const value = publicPromoConfig(raw || PROMO_DEFAULTS);
+  // configPath is included so anyone reading this response — an admin in
+  // a browser, a future developer, me in six months — knows where to go
+  // and change it, without having to find the constant in this file.
+  const value = {
+    ...publicPromoConfig(raw || PROMO_DEFAULTS),
+    configPath: 'app_config/promo',
+  };
   _promoCache = { at: now, value };
   return res.json(value);
 });
