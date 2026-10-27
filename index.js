@@ -26,6 +26,7 @@ const { computeTransits } = require('./lib/transits');
 // is constructed at module top level a few hundred lines below, and a const
 // cannot be used before its declaration is evaluated.
 const { createAdminCache } = require('./lib/admin-cache');
+const { buildTeaser } = require('./lib/paywall-teaser');
 const { publicPromoConfig, DEFAULTS: PROMO_DEFAULTS } =
   require('./lib/promo-config');
 // Timezone-correct birth-time handling: geo-tz maps lat/lon -> IANA
@@ -3355,6 +3356,38 @@ async function syncSubscriptionToFirestore(event) {
   }
 }
 
+/**
+ * The chart-grounded line shown when a free user's lifetime chat is spent.
+ *
+ * Confined to the paywall branch rather than hoisting the chart
+ * computation above the quota check: that would make every rate-limited
+ * request pay for a chart it does not use, and would move real work to
+ * before the abuse cap instead of after it.
+ *
+ * Coordinates only — no geocode fallback. Since the app started sending
+ * lat/lon with every chart request they are almost always present, and a
+ * network round trip to Nominatim is not worth making on a request that is
+ * already being refused. No coordinates simply means no teaser.
+ *
+ * Returns null on any failure. This decorates a 429; it must never be the
+ * reason one becomes a 500.
+ */
+function buildPaywallTeaser({ question, birthDate, birthTime, lat, lon }) {
+  try {
+    if (!birthDate || !birthTime || !lat || !lon) return null;
+    const chart = calculateChart(birthDate, birthTime, lat, lon);
+    if (!chart) return null;
+    const result = buildTeaser({
+      chart,
+      topics: detectQuestionTopics(question),
+    });
+    return result ? result.line : null;
+  } catch (e) {
+    console.warn('[chat] paywall teaser failed:', e.message);
+    return null;
+  }
+}
+
 // POST /chart - Calculate birth chart
 app.post('/chart', async (req, res) => {
   const auth = await verifyAuth(req, res);
@@ -3426,9 +3459,21 @@ app.post('/chat', async (req, res) => {
         if (used >= 1) {
           console.warn(`[chat] free lifetime limit reached uid=${auth.uid} (used=${used})`);
           return res.status(429).json({
-            error: 'You have used your free chat. Get the ₹49 Starter Pass for 5 chats a day for 7 days.',
+            // Corrected: the Pass is 21 chats per WEEK and bills weekly as
+            // a recurring subscription. The old text promised "5 chats a
+            // day for 7 days" — 35, framed as a one-off — which matches
+            // neither RATE_LIMITS.pass nor the app's own plan copy. The app
+            // discards this string and shows its own, so no user saw it,
+            // but an API that misstates a recurring product is a liability.
+            error: 'You have used your free chat. The ₹49 Starter Pass '
+              + 'includes 21 chats a week.',
             paywall: true,
             plan: 'free',
+            // One true, specific line about THEIR chart, so the highest
+            // intent moment in the product stops returning nothing. Costs
+            // no LLM call — see lib/paywall-teaser.js. Best-effort: a
+            // failure here must never turn a paywall into a 500.
+            teaser: buildPaywallTeaser({ question, birthDate, birthTime, lat, lon }),
           });
         }
         freeChatToCharge = true; // increment after a successful answer
